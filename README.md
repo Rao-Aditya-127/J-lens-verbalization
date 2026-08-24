@@ -105,7 +105,7 @@ dataset/
     score.py                 # overlap@10 / precision / recall / F1
     viewer/index.html        # self-contained browser for the collected data
     README.md                # pipeline detail
-think/                       # research notes (git-ignored)
+think/                       # research notes -- git-ignored, kept locally
   decision_log.md            # authoritative history: every decision, bug, and result
 index.html                   # root redirect to the viewer, for GitHub Pages
 ```
@@ -174,8 +174,7 @@ Reverse-engineered from source; the rendered docs don't cover these.
 - **Exact-match scoring.** `"Percentage Multiplication"` vs. J-lens's
   `"percentage"` scores as a total miss. Stemmed, mass-weighted and rank-1
   variants were all tried post-hoc; they move the numbers modestly without
-  changing the ordering, so the simpler metric was kept. See
-  `think/decision_log.md`.
+  changing the ordering, so the simpler metric was kept.
 - **Top-10-by-frequency may be the wrong target.** The top ranks skew toward
   concepts obviously implied by the prompt. Whether the mid-frequency band
   carries more interesting signal is open.
@@ -183,7 +182,7 @@ Reverse-engineered from source; the rendered docs don't cover these.
 - ICL demonstrations went through a full redesign after the original pair was
   found to share a bias that inflated one token across the whole dataset. The
   fix changed the substantive finding -- ICL scored 0.213 before and 0.274
-  after. `decision_log.md` documents this in full.
+  after.
 
 ## Next steps
 
