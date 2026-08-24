@@ -60,6 +60,19 @@
   }
   #dropzone.drag { border-color: var(--accent); color: var(--accent); }
   #status { margin-left: auto; font-size: 12px; color: var(--muted); white-space: nowrap; }
+  #urlLoad { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
+  #urlLoad label { font-size: 12px; color: var(--muted); white-space: nowrap; }
+  #urlInput { flex: 1; }
+  button {
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: 6px;
+    padding: 5px 12px;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  button:hover { opacity: 0.9; }
   main { padding: 16px 18px 40px; max-width: 1200px; margin: 0 auto; }
   section.panel {
     background: var(--panel);
@@ -148,6 +161,11 @@
     <input type="file" id="fileInput" accept=".jsonl,.json,.txt">
     <span id="status">no file loaded</span>
   </div>
+  <div id="urlLoad">
+    <label for="urlInput">or load from a URL</label>
+    <input type="text" id="urlInput" placeholder="https://huggingface.co/datasets/.../collected_introspection.jsonl">
+    <button id="urlLoadBtn" type="button">Load</button>
+  </div>
 </header>
 
 <main>
@@ -206,6 +224,13 @@
 </main>
 
 <script>
+// Auto-loaded on page open when the URL has no ?data=<url> override, so the
+// page has something to show by default. Any CORS-enabled raw URL works --
+// this one points at the Hugging Face dataset repo (served gzipped, ~810 KB
+// on the wire). Leave empty to require an explicit ?data= link or a manual
+// file/URL load instead.
+const DEFAULT_DATA_URL = "https://huggingface.co/datasets/RaoAditya/j-lens-verbalization/resolve/main/collected_introspection.jsonl";
+
 let rows = [];
 let expanded = new Set();
 
@@ -249,12 +274,41 @@ function parseJSONL(text) {
   return { parsed, badLines };
 }
 
+function setStatus(text, isError) {
+  const el = document.getElementById("status");
+  el.textContent = text;
+  el.style.color = isError ? "var(--bad)" : "";
+}
+
+function loadFromUrl(url) {
+  if (!url) return;
+  setStatus(`loading ${url}…`);
+  fetch(url)
+    .then(response => {
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return response.text();
+    })
+    .then(text => {
+      loadText(text, url);
+      const params = new URLSearchParams(location.search);
+      params.set("data", url);
+      history.replaceState(null, "", `${location.pathname}?${params.toString()}`);
+    })
+    .catch(err => {
+      setStatus(
+        `could not load ${url} (${err.message}) -- the host may not allow cross-origin requests ` +
+        `(Hugging Face resolve, raw.githubusercontent.com and jsDelivr URLs all work). ` +
+        `Drop a file manually instead.`,
+        true
+      );
+    });
+}
+
 function loadText(text, label) {
   const { parsed, badLines } = parseJSONL(text);
   rows = parsed;
   expanded = new Set();
-  document.getElementById("status").textContent =
-    `${label}: ${rows.length} rows` + (badLines ? `, ${badLines} unparsable lines skipped` : "");
+  setStatus(`${label}: ${rows.length} rows` + (badLines ? `, ${badLines} unparsable lines skipped` : ""));
 
   const sourceFilter = document.getElementById("sourceFilter");
   const sources = Array.from(new Set(rows.map(r => sourceOf(r.example_id || "")))).sort();
@@ -440,6 +494,25 @@ dropzone.addEventListener("drop", (e) => {
   if (!file) return;
   file.text().then(text => loadText(text, file.name));
 });
+
+const urlInput = document.getElementById("urlInput");
+document.getElementById("urlLoadBtn").addEventListener("click", () => loadFromUrl(urlInput.value.trim()));
+urlInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    loadFromUrl(urlInput.value.trim());
+  }
+});
+
+// Auto-load on page open: an explicit ?data=<url> wins (lets a link point at
+// specific hosted data); otherwise fall back to DEFAULT_DATA_URL so the page
+// has something to show with no link at all. Drag-and-drop / manual URL
+// entry stay available either way.
+const initialDataUrl = new URLSearchParams(location.search).get("data") || DEFAULT_DATA_URL;
+if (initialDataUrl) {
+  urlInput.value = initialDataUrl;
+  loadFromUrl(initialDataUrl);
+}
 </script>
 </body>
 </html>
