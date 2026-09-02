@@ -1,5 +1,5 @@
 .env
-dataset/jlens/raw/
+dataset/jlens/raw*/
 *.jsonl
 think/
 __pycache__/
@@ -10,3 +10,14 @@ venv/
 .pytest_cache/
 .DS_Store
 Thumbs.db
+dataset/jlens/analysis/
+report/
+
+# Claude Code local machine state (settings.json, if added, stays tracked)
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
+
+# scratch / backup artefacts
+*.bak
+*.tmp
+nohup.out

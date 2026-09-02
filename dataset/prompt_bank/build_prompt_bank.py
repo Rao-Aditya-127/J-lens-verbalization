@@ -12,6 +12,7 @@ import argparse
 import csv
 import io
 import json
+import random
 from pathlib import Path
 from urllib.request import urlopen
 
@@ -27,14 +28,35 @@ TRUTHFULQA_URL = "https://raw.githubusercontent.com/sylinrl/TruthfulQA/main/Trut
 ARC_REVISION = "210d026faf9955653af8916fad021475a3f00453"
 HOTPOTQA_REVISION = "1908d6afbbead072334abe2965f91bd2709910ab"
 HOTPOTQA_CONFIG = "distractor"
+# 15 of BBH's 27 subtasks. The original bank used 5, which under-sampled the
+# benchmark's diversity; near-duplicate size variants (logical_deduction_three/
+# seven, tracking_shuffled_three/seven) are deliberately excluded in favour of
+# breadth. Diversity matters more than volume here -- aggregate results in this
+# project have repeatedly hidden per-domain variation.
 BBH_TASKS = (
     "boolean_expressions",
     "causal_judgement",
     "date_understanding",
+    "disambiguation_qa",
+    "formal_fallacies",
+    "geometric_shapes",
+    "hyperbaton",
     "logical_deduction_five_objects",
+    "movie_recommendation",
+    "multistep_arithmetic_two",
+    "navigate",
+    "object_counting",
+    "reasoning_about_colored_objects",
+    "sports_understanding",
     "tracking_shuffled_objects_five_objects",
 )
 PROMPT_CHAR_LIMIT = 1024
+
+# Train/validation/test proportions. Splits are assigned stratified by source
+# (and by BBH subtask within BBH) so every split covers every source, with a
+# fixed seed so the assignment is reproducible.
+SPLIT_FRACTIONS = (("train", 0.79), ("validation", 0.08), ("test", 0.13))
+SPLIT_SEED = 20260829
 
 
 def parse_args() -> argparse.Namespace:
@@ -268,6 +290,36 @@ def hotpotqa_records(count: int) -> list[dict[str, object]]:
     return records
 
 
+def assign_splits(records: list[dict[str, object]]) -> None:
+    """Stratified train/validation/test assignment, in place.
+
+    Strata are (source_dataset, source_config_or_task) so BBH is balanced per
+    subtask rather than only per source. Shuffling uses a fixed seed, so
+    rebuilding the bank with the same counts reproduces the same assignment.
+    """
+    strata: dict[tuple, list[dict]] = {}
+    for record in records:
+        key = (record["source_dataset"], record.get("source_config_or_task"))
+        strata.setdefault(key, []).append(record)
+
+    rng = random.Random(SPLIT_SEED)
+    for key in sorted(strata, key=lambda k: (str(k[0]), str(k[1]))):
+        bucket = strata[key]
+        rng.shuffle(bucket)
+        total = len(bucket)
+        # largest-remainder allocation so every stratum sums exactly to its size
+        raw = [(name, frac * total) for name, frac in SPLIT_FRACTIONS]
+        counts = {name: int(value) for name, value in raw}
+        while sum(counts.values()) < total:
+            name = max(raw, key=lambda item: item[1] - int(item[1]) - (1 if counts[item[0]] > int(item[1]) else 0))[0]
+            counts[name] += 1
+        index = 0
+        for name, _ in SPLIT_FRACTIONS:
+            for record in bucket[index:index + counts[name]]:
+                record["split"] = name
+            index += counts[name]
+
+
 def main() -> None:
     args = parse_args()
     records = (
@@ -277,6 +329,15 @@ def main() -> None:
         + arc_challenge_records(args.arc_count)
         + hotpotqa_records(args.hotpotqa_count)
     )
+    assign_splits(records)
+    summary: dict[str, dict[str, int]] = {}
+    for record in records:
+        summary.setdefault(str(record["source_dataset"]), {}).setdefault(str(record["split"]), 0)
+        summary[str(record["source_dataset"])][str(record["split"])] += 1
+    print("split assignment (stratified by source and BBH subtask):")
+    for source in sorted(summary):
+        counts = summary[source]
+        print(f"  {source:<34} " + "  ".join(f"{k}={counts.get(k, 0)}" for k, _ in SPLIT_FRACTIONS))
 
     output = args.output
     if output is None:

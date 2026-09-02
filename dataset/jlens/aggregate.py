@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 DEFAULT_LENS_TYPE = "JACOBIAN_LENS"
-AGGREGATION_VERSION = "frequency_over_selected_layers_and_answer_tokens_v1"
+AGGREGATION_VERSION = "frequency_over_selected_layers_and_answer_tokens_v2"  # v2: workspace-band window (24-58)
 
 
 def normalize_token(token: str) -> str:

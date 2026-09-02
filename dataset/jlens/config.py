@@ -14,11 +14,23 @@ MODEL_ID = "qwen3.6-27b"
 LENS_TYPE = "JACOBIAN_LENS"
 
 # Confirmed live: qwen3.6-27b exposes JACOBIAN_LENS layers 0-63.
-LAYER_MIN = 22
-LAYER_MAX = 63
+#
+# Window locked to the workspace band. Gurnee et al. (2026), "Verbalizable
+# Representations Form a Global Workspace in Language Models", identify three
+# functional regions on layers reindexed to 0-100: sensory (~0-38),
+# workspace (~38-92), and motor (~92-100), where motor-band J-lens readouts
+# are simply next-token predictions rather than abstract workspace content.
+# Mapped onto 64 layers that is roughly 24-58. The previous 22-63 window
+# included five motor layers; measured effect of excluding them: 8% of the
+# top-10 changes, and the share of target concepts already present in the
+# prompt/answer text drops 63.1% -> 58.2%.
+LAYER_MIN = 24
+LAYER_MAX = 58
 
 TOP_N_API = 8  # API ceiling for `topN` is 8, not 10.
-TOP_K_CONCEPTS = 10
+TOP_K_CONCEPTS = 15  # both lists are top-15: more novel content per row (41% vs 37%)
+NOVEL_SEARCH_DEPTH = 120  # how deep to look when collecting 15 novel concepts
+NOVEL_RULE = "absent_as_substring_of_lowercased_question_plus_answer"  # both lists are top-15: more novel content per row (41% vs 37%)
 
 TEMPERATURE = 0
 FILTER_NON_WORD_TOKENS = True
@@ -70,8 +82,34 @@ DEMO_PROMPT_IDS = ["truthfulqa_0010", "hotpotqa_0013"]
 
 INTROSPECTION_CONDITIONS = ["zero_shot", "few_shot_icl", "text_only_control"]
 
-RATE_LIMIT_MIN_INTERVAL_SECONDS = 16.0  # ~225 calls/hour, under the 240/hour cap.
+RATE_LIMIT_MIN_INTERVAL_SECONDS = 16.0  # per WORKER. With 4 shards and ~50s
+# API latency this is ~78s/row each = ~184 calls/hour combined, safely under the
+# 240/hour cap. At 16s the four workers collectively exceeded the cap, and the
+# flat backoff resynchronised them into a wait-retry-fail cycle: throughput
+# collapsed to 12 rows/hour. Pacing below the limit beats colliding with it.
 MAX_RETRIES = 5
+# A 429 needs wall-clock waiting, not fast retries: the limit is a sliding
+# 60-minute window, so requests have to age out of it. The shared
+# exponential schedule tops out at ~15 min total, which is not enough.
+# The window (60 min, 240 req) releases ~4 slots/minute. A 300s sleep means
+# workers snooze through their own replenishment: measured throughput fell to
+# 57/hour against a 240/hour allowance. Retry sooner, with jitter so workers
+# do not resynchronise, and let the pacing keep the average legal.
+# Retries are REQUESTS: a rejected call still counts against the 240/hour
+# window. Four workers retrying every 45s made ~320 attempts/hour on their own
+# and locked us out permanently (2 rows/hour for 9 hours). Budget TOTAL attempts:
+# 3 workers x 16s pacing = ~162 successes/hr, plus ~60/hr of retries = ~222 < 240.
+# 60s, not 180s. Measured 2026-09-01: with 180s the three workers slept through
+# a window that was 95% free (X-Limit-Remaining=229 of 240) and threw away two
+# hours at ~18 rows/hour. A 10-retry chain at 180s is 30 min asleep on ONE row.
+# 3 workers x 60s = at most 180 retry attempts/hr, which the measured headroom
+# absorbs. Read X-Limit-Remaining before changing this again -- if it is high,
+# the workers are idling, not throttled.
+RATE_LIMIT_BACKOFF_SECONDS = 60.0
+RATE_LIMIT_MAX_RETRIES = 10
+# Stop an unattended run if this many rows fail back-to-back: that means
+# something systemic (dead key, outage), not an unlucky row.
+MAX_CONSECUTIVE_FAILURES = 15
 RETRY_BACKOFF_BASE_SECONDS = 30.0
 # urllib.request.urlopen has no timeout by default (blocks forever). A real
 # collection run hit this: one ordinary request stalled and the whole process
@@ -79,7 +117,7 @@ RETRY_BACKOFF_BASE_SECONDS = 30.0
 REQUEST_TIMEOUT_SECONDS = 90.0
 
 PROMPT_BANK_PATH = Path(__file__).resolve().parents[1] / "prompt_bank" / (
-    "prompt_bank_gsm8k_bbh_truthfulqa_arc_hotpotqa_225.jsonl"
+    "prompt_bank_gsm8k_bbh_truthfulqa_arc_hotpotqa_3800.jsonl"
 )
 JLENS_DIR = Path(__file__).resolve().parent
 RAW_DIR = JLENS_DIR / "raw"
