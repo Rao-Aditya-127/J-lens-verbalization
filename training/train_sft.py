@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 
 import torch
@@ -49,7 +50,20 @@ def main() -> None:
     p.add_argument("--batch-size", type=int, default=4)
     p.add_argument("--grad-accum", type=int, default=4)
     p.add_argument("--max-seq-len", type=int, default=1024)
+    p.add_argument("--track", choices=["auto", "wandb", "tensorboard", "none"], default="auto",
+                   help="auto = wandb if WANDB_API_KEY is set, else none")
+    p.add_argument("--run-name", default=None, help="name shown in the tracker")
     args = p.parse_args()
+
+    # A rented pod is ephemeral: anything written locally dies with it. Cloud
+    # tracking survives, which is why wandb is the default when a key is present.
+    if args.track == "auto":
+        args.track = "wandb" if os.environ.get("WANDB_API_KEY") else "none"
+    if args.track == "wandb":
+        os.environ.setdefault("WANDB_PROJECT", "jlens-verbalization")
+    run_name = args.run_name or args.output_dir.name
+    print(f"tracking: {args.track}" + (f"  (project jlens-verbalization, run {run_name})"
+                                       if args.track == "wandb" else ""))
 
     train = load_split("train")
     val = load_split("validation")
@@ -104,7 +118,11 @@ def main() -> None:
         # re-predicting the question and answer already present in the context.
         completion_only_loss=True,
         packing=False,          # packing would blur the completion mask across examples
-        report_to="none",
+        report_to=[] if args.track == "none" else [args.track],
+        run_name=run_name,
+        # trainer_state.json records every logged metric regardless of tracker,
+        # so the curves are recoverable even if tracking was off or the pod died.
+        logging_first_step=True,
         seed=17,
     )
 
@@ -141,9 +159,30 @@ def main() -> None:
     print("=" * 70 + "\n")
 
     trainer.train()
-    trainer.save_model(str(args.output_dir / "final"))
-    tokenizer.save_pretrained(str(args.output_dir / "final"))
-    print(f"\nadapter saved to {args.output_dir / 'final'}")
+    final = args.output_dir / "final"
+    trainer.save_model(str(final))
+    tokenizer.save_pretrained(str(final))
+
+    # Keep the metric history beside the adapter. This is the fallback that
+    # survives a dead pod even if no tracker was configured -- plot_training.py
+    # renders the curves from it.
+    history = final / "log_history.json"
+    history.write_text(json.dumps(trainer.state.log_history, indent=1), encoding="utf-8")
+
+    losses = [h for h in trainer.state.log_history if "loss" in h]
+    evals = [h for h in trainer.state.log_history if "eval_loss" in h]
+    print(f"\nadapter saved to  {final}")
+    print(f"metric history    {history}  ({len(losses)} train points, {len(evals)} eval points)")
+    if losses:
+        print(f"train loss  first {losses[0]['loss']:.4f}  ->  last {losses[-1]['loss']:.4f}")
+    if evals:
+        best = min(evals, key=lambda h: h["eval_loss"])
+        print(f"eval  loss  first {evals[0]['eval_loss']:.4f}  ->  last {evals[-1]['eval_loss']:.4f}"
+              f"   best {best['eval_loss']:.4f} at step {best.get('step')}")
+        if evals[-1]["eval_loss"] > best["eval_loss"] * 1.02:
+            print("  NOTE: eval loss ended above its best -- overfitting; a shorter run may score better")
+    print("\nDOWNLOAD the adapter and log_history.json before terminating the pod --")
+    print("local files do not survive it.")
 
 
 if __name__ == "__main__":
