@@ -1,7 +1,10 @@
 # -*- coding: utf-8 -*-
 """Evaluate a fine-tuned adapter on the held-out test split.
 
-    python training/eval_sft.py --adapter training/runs/qlora-v1/final
+    python training/eval_sft.py --adapter training/runs/qlora-v1/final --limit 150
+
+    # baseline: the untrained model needs the format spelled out, see FORMAT_HINT
+    python training/eval_sft.py --base-only --adapter none --limit 150 --format-hint
 
 Reports overlap@15 for both target lists, per source, and -- crucially -- under
 BOTH framings:
@@ -63,10 +66,29 @@ ASK = {
         "NOWHERE in the question or in the answer? " + _B_PERMISSION + HONESTY,
 }
 
+# The fine-tuned model learns this shape from its targets and needs no instruction.
+# An untrained model has no way to guess it, so scoring the base model WITHOUT
+# stating the format measures format compliance rather than knowledge -- it returns
+# prose, the parser finds no numbered list, and every score is 0. Pass --format-hint
+# for any --base-only run, and say so when reporting the comparison.
+FORMAT_HINT = (
+    "\n\nReply with exactly 15 entries and nothing else, in exactly this format:\n"
+    "<INTROSPECTION>\nConcepts:\n1. first\n2. second\n...\n15. fifteenth\n</INTROSPECTION>"
+)
+
 LINE = re.compile(r"^\s*\d+[.)]\s*(.+?)\s*$")
+# Qwen3.6 is a thinking model. Reasoning has to be stripped before parsing or
+# numbered lines inside it get scraped as though they were the answer.
+THINK = re.compile(r"<think>.*?</think>", re.S)
+OPEN_THINK = re.compile(r"<think>.*", re.S)
 
 
 def parse(text: str, k: int) -> list[str]:
+    text = THINK.sub("", text)
+    if "<INTROSPECTION>" not in text:
+        # an unclosed <think> means generation ran out of budget mid-reasoning:
+        # everything after it is reasoning, not an answer
+        text = OPEN_THINK.sub("", text)
     m = re.search(r"<INTROSPECTION>(.*?)(?:</INTROSPECTION>|$)", text, re.S)
     block = m.group(1) if m else text
     out = [x.group(1).strip().lower() for x in (LINE.match(l) for l in block.splitlines()) if x]
@@ -80,6 +102,12 @@ def main() -> None:
     p.add_argument("--k", type=int, default=15)
     p.add_argument("--out", type=Path, default=REPO / "training" / "eval_results.json")
     p.add_argument("--base-only", action="store_true", help="skip the adapter, score the base model")
+    p.add_argument("--max-new-tokens", type=int, default=160,
+                   help="raise it if the model reasons before answering")
+    p.add_argument("--show-raw", type=int, default=0,
+                   help="print the first N raw generations verbatim, then carry on")
+    p.add_argument("--format-hint", action="store_true",
+                   help="append the exact output format to every ask; use with --base-only")
     args = p.parse_args()
 
     rows = [json.loads(l) for l in
@@ -89,6 +117,9 @@ def main() -> None:
     if args.limit:
         rows = rows[: args.limit]
     print(f"evaluating {len(rows)} test rows x 2 lists x 2 framings = {len(rows) * 4} generations")
+    if args.base_only and not args.format_hint:
+        print("WARNING: --base-only without --format-hint. The untrained model has never "
+              "been shown the output format and will likely score 0 everywhere.")
 
     tok = AutoTokenizer.from_pretrained(MODEL_ID)
     if tok.pad_token is None:
@@ -104,6 +135,7 @@ def main() -> None:
         print(f"loaded adapter: {args.adapter}")
     model.eval()
 
+    shown = [0]
     scores = defaultdict(list)
     leak = defaultdict(list)
     fmt = defaultdict(list)
@@ -121,15 +153,26 @@ def main() -> None:
                     {"role": "system", "content": SYSTEM_INTRO if framing == "introspective" else SYSTEM_GUESS},
                     {"role": "user", "content": row["question"]},
                     {"role": "assistant", "content": answer},
-                    {"role": "user", "content": ASK[(mode, framing)]},
+                    {"role": "user", "content": ASK[(mode, framing)]
+                     + (FORMAT_HINT if args.format_hint else "")},
                 ]
                 prompt = tok.apply_chat_template(chat, tokenize=False, add_generation_prompt=True)
                 inputs = tok(prompt, return_tensors="pt").to(model.device)
                 with torch.no_grad():
-                    out = model.generate(**inputs, max_new_tokens=160, do_sample=False,
-                                         pad_token_id=tok.pad_token_id)
+                    out = model.generate(**inputs, max_new_tokens=args.max_new_tokens,
+                                         do_sample=False, pad_token_id=tok.pad_token_id)
+                new_tokens = out[0].shape[0] - inputs["input_ids"].shape[1]
                 raw = tok.decode(out[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
                 pred = parse(raw, args.k)
+                if shown[0] < args.show_raw:
+                    shown[0] += 1
+                    print("\n" + "-" * 66)
+                    print(f"RAW {shown[0]}  mode={mode}  framing={framing}  "
+                          f"{new_tokens} new tokens")
+                    print("-" * 66)
+                    print(raw)
+                    print("-" * 66)
+                    print(f"parsed {len(pred)}: {pred}", flush=True)
                 # Did it actually learn the format? Count what it emitted BEFORE
                 # truncation, and whether it produced a well-formed block. A tidy
                 # score can hide a model that emits 9 concepts or never closes the
@@ -141,6 +184,7 @@ def main() -> None:
                     "opened": "<INTROSPECTION>" in raw,
                     "closed": "</INTROSPECTION>" in raw,
                     "distinct": len(set(pred)) == len(pred),
+                    "truncated": new_tokens >= args.max_new_tokens,
                 })
                 hits = len(set(pred) & truth) / args.k
                 key = f"{mode}_{framing}"
@@ -154,6 +198,19 @@ def main() -> None:
         if n % 25 == 0 or n == len(rows):
             print(f"  {n}/{len(rows)}  " + "  ".join(
                 f"{k}={mean(v):.3f}" for k, v in sorted(scores.items())), flush=True)
+
+    # An all-zero table is a parse failure, not a finding. Stop rather than let it
+    # be written to disk and read later as though it were a measurement.
+    if all(x == 0 for v in scores.values() for x in v):
+        empty = sum(1 for v in fmt.values() for x in v if x["n"] == 0)
+        trunc = sum(1 for v in fmt.values() for x in v if x["truncated"])
+        raise SystemExit(
+            f"\nEVERY score is 0 across {len(rows) * 4} generations. That is a parse "
+            f"failure, not a result.\n"
+            f"  {empty} generations parsed to nothing; {trunc} hit the token limit.\n"
+            "Nothing was written. Look at what the model actually emitted:\n"
+            "  python training/eval_sft.py --base-only --adapter none \\\n"
+            "      --limit 3 --show-raw 4 --format-hint --max-new-tokens 512")
 
     print("\n" + "=" * 66)
     print(f"{'target':<10}{'introspective':>16}{'guessing':>12}{'difference':>14}")
@@ -186,6 +243,10 @@ def main() -> None:
         print("  short lists lose recall; long ones are truncated to 15 by the parser")
     else:
         print("  every generation emitted exactly 15 -- format fully learned")
+    trunc = sum(1 for v in fmt.values() for x in v if x["truncated"])
+    if trunc:
+        print(f"  {trunc} generations hit the {args.max_new_tokens}-token limit and were cut off "
+              f"-- raise --max-new-tokens")
 
     per_source = defaultdict(lambda: defaultdict(list))
     for r in records:
@@ -199,7 +260,10 @@ def main() -> None:
     print("\nreport per source: GSM8K has been an outlier in every comparison on this data")
 
     args.out.write_text(json.dumps(
-        {"summary": {k: mean(v) for k, v in scores.items()}, "rows": records},
+        {"config": {"base_only": args.base_only, "format_hint": args.format_hint,
+                    "max_new_tokens": args.max_new_tokens, "limit": args.limit,
+                    "adapter": None if args.base_only else str(args.adapter)},
+         "summary": {k: mean(v) for k, v in scores.items()}, "rows": records},
         ensure_ascii=False, indent=1), encoding="utf-8")
     print(f"\nwrote {args.out}")
 
