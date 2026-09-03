@@ -11,7 +11,7 @@ On <https://runpod.io> → **Pods** → **Deploy**.
 | setting | value | why |
 |---|---|---|
 | GPU | **1 × L40S (48 GB)** | ~$0.99/hr. A100 80GB also fine if you want headroom |
-| Template | **RunPod PyTorch 2.4** (or any `pytorch` image) | CUDA + torch preinstalled |
+| Template | **RunPod PyTorch 2.6 or newer** | torch < 2.5 breaks transformers — see step 2 |
 | Container Disk | **60 GB** | OS, python packages |
 | **Volume Disk** | **150 GB** | **persistent** — mounted at `/workspace`, survives stop/start |
 | Volume Mount Path | `/workspace` | the default |
@@ -39,6 +39,29 @@ python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
 
 If `cuda.is_available()` prints `False`, the pod has no GPU attached — destroy it
 and redeploy. Nothing below will work.
+
+### torch must be >= 2.5
+
+Check the version the template gave you:
+
+```bash
+python -c "import torch; print(torch.__version__)"
+```
+
+**If it starts with `2.4` or lower, upgrade now**, before installing anything
+else:
+
+```bash
+pip install --upgrade torch torchvision
+pip install --upgrade --force-reinstall bitsandbytes
+python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+```
+
+Qwen3.6's `qwen3_5` architecture only exists in recent `transformers`, and recent
+`transformers` requires torch >= 2.5. On an older torch it disables its PyTorch
+backend and then fails with a confusing `NameError: name 'nn' is not defined`
+somewhere deep in an import — see the troubleshooting entry. Pinning
+`transformers` back is not a workaround; the model would not load at all.
 
 ---
 
@@ -273,7 +296,14 @@ python training/train_sft.py --liger
 `--liger` is off by default because liger-kernel has to support this exact
 architecture and fails loudly if it does not. Try the batch size first.
 
-**`bitsandbytes` import error** — `pip install -U bitsandbytes`.
+**`NameError: name 'nn' is not defined`** from inside a `transformers` import,
+usually preceded by `Disabling PyTorch because PyTorch >= 2.5 is required but
+found 2.4.x`. The torch version is too old for `transformers`; the `NameError` is
+a downstream symptom. Fix with the torch upgrade in step 2.
+
+**`bitsandbytes` import error** — `pip install -U bitsandbytes`. After any torch
+upgrade, use `pip install --upgrade --force-reinstall bitsandbytes` so it rebinds
+to the new torch.
 
 **Loss starts near 0.1** — the mask is letting the model see the answer. Stop and
 send me the masking block.
