@@ -189,8 +189,20 @@ echo 'export WANDB_API_KEY=<your key>' >> ~/.bashrc
 ## 9. Baseline: score the UNTRAINED model first
 
 ```bash
-python training/eval_sft.py --base-only --adapter none --limit 150
+python training/check_template.py     # CPU only, seconds -- run once
+
+python training/eval_sft.py --base-only --adapter none --limit 150     --format-hint --no-thinking --max-new-tokens 256
 ```
+
+**`--no-thinking` is mandatory on every eval run.** Qwen3.6 reasons by default;
+without it the prompt ends at `<think>` and the model spends its whole budget
+reasoning without ever answering. It also makes the eval prompt byte-identical to
+what training renders — `check_template.py` shows both.
+
+**`--format-hint` too, on both runs.** The fine-tuned model learns the output
+shape from its targets; the base model has never seen it. Giving the hint to both
+keeps the prompts identical, so the comparison isolates what training added
+*beyond* format compliance rather than measuring the format itself.
 
 This gives you a before/after under *identical* prompts and rows. The 0.247
 figure from earlier used a different prompt on different rows, so it is not a
@@ -203,9 +215,12 @@ of up to 160 tokens.
 
 | `--limit` | generations | rough wall time |
 |---|---|---|
-| 50 | 200 | ~40 min |
-| **150** | **600** | **~2 hr** |
-| all (486) | 1944 | ~6.5 hr — $6+ of GPU |
+| 50 | 200 | ~15 min |
+| **150** | **600** | **~45 min** |
+| all (486) | 1944 | ~2.5 hr |
+
+(With thinking left on these were 4-6x longer, because every generation ran to
+the token limit mid-reasoning and produced nothing.)
 
 `--limit 150` is the right call: it takes the first 150 test rows
 deterministically, so the baseline and the post-training eval score the *same*
@@ -235,9 +250,18 @@ Concepts:
 94 of 512 tokens are loss-bearing (18%) -- expect roughly 10-20%
 ```
 
-**Read it.** If the question or the answer appears in that block, the mask is
-wrong and the full run would be wasted. If it says 0 loss-bearing tokens the
-script stops by itself.
+**Read it.** Two things to check:
+
+1. If the question or the answer appears in that block, the mask is wrong and the
+   full run would be wasted. If it says 0 loss-bearing tokens the script stops by
+   itself.
+2. Whether the block starts with `<think>` or straight in at `<INTROSPECTION>`.
+   The template puts an empty `<think>
+
+</think>` before every assistant turn.
+   If that falls inside the loss, the model learns to emit it — and since the
+   `--no-thinking` eval prompt already ends with it, the model would emit a second
+   one. Harmless for parsing (`clean()` strips it) but worth knowing.
 
 ---
 
@@ -259,13 +283,15 @@ Expect **2-4 hours**. Watch that loss starts around 2-4 and falls.
 ## 12. Evaluate
 
 ```bash
-python training/eval_sft.py --adapter training/runs/qlora-v1/final --limit 150     --out training/eval_after.json
+python training/eval_sft.py --adapter training/runs/qlora-v1/final --limit 150     --format-hint --no-thinking --max-new-tokens 256     --out training/eval_after.json
 python training/plot_training.py training/runs/qlora-v1/final/log_history.json
 ```
 
-**Use the same `--limit` as step 9**, or you are comparing different rows. Note
-the separate `--out`: the default path is the same file the baseline wrote, and
-without this the baseline numbers are overwritten.
+**Every flag must match step 9** — same `--limit` (or you compare different
+rows), same `--format-hint` and `--no-thinking` (or you compare different
+prompts). Both runs record their settings in the `config` block of their JSON;
+check they agree before believing any difference. The separate `--out` matters
+too: the default path is the file the baseline wrote.
 
 The table to read is `list A introspective` vs `list A guessing`. If they are
 equal, the model learned to *predict* J-lens output from text rather than to read
