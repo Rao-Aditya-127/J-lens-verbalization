@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import time
 from collections import defaultdict
 from pathlib import Path
 from statistics import mean
@@ -77,6 +78,15 @@ FORMAT_HINT = (
 )
 
 LINE = re.compile(r"^\s*\d+[.)]\s*(.+?)\s*$")
+
+
+def hms(seconds: float) -> str:
+    seconds = int(seconds)
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m{seconds % 60:02d}s"
+    return f"{seconds // 3600}h{(seconds % 3600) // 60:02d}m"
 # Qwen3.6 reasons by default. The reasoning is numbered markdown, so without
 # stripping it the parser scrapes headings like "1. **Deconstruct the request:**"
 # and reports them as concepts. NOTE: decode with skip_special_tokens=False, or
@@ -135,6 +145,8 @@ def main() -> None:
                    help="print the first N raw generations verbatim, then carry on")
     p.add_argument("--format-hint", action="store_true",
                    help="append the exact output format to every ask; use with --base-only")
+    p.add_argument("--progress-every", type=int, default=1,
+                   help="print a progress line every N rows (default: every row)")
     args = p.parse_args()
 
     rows = [json.loads(l) for l in
@@ -163,6 +175,7 @@ def main() -> None:
     model.eval()
 
     shown = [0]
+    started = time.time()
     scores = defaultdict(list)
     leak = defaultdict(list)
     fmt = defaultdict(list)
@@ -230,9 +243,15 @@ def main() -> None:
                 rec[key] = hits
                 rec[f"{key}_pred"] = pred
         records.append(rec)
-        if n % 25 == 0 or n == len(rows):
-            print(f"  {n}/{len(rows)}  " + "  ".join(
-                f"{k}={mean(v):.3f}" for k, v in sorted(scores.items())), flush=True)
+        if n % max(args.progress_every, 1) == 0 or n == len(rows):
+            elapsed = time.time() - started
+            per_row = elapsed / n
+            bar_done = int(24 * n / len(rows))
+            bar = "#" * bar_done + "." * (24 - bar_done)
+            print(f"  [{bar}] {n:>4}/{len(rows)} {100 * n / len(rows):>3.0f}%  "
+                  f"{hms(elapsed)} elapsed, {hms(per_row * (len(rows) - n))} left  "
+                  f"({per_row:.1f}s/row)  " + "  ".join(
+                      f"{k}={mean(v):.3f}" for k, v in sorted(scores.items())), flush=True)
 
     # An all-zero table is a parse failure, not a finding. Stop rather than let it
     # be written to disk and read later as though it were a measurement.

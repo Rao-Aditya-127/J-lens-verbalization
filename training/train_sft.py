@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 from pathlib import Path
 
@@ -164,6 +165,14 @@ def main() -> None:
     if not kept:
         raise SystemExit("no loss-bearing tokens: the completion mask is wrong, stopping")
     print("=" * 70 + "\n")
+
+    steps_per_epoch = math.ceil(len(train) / (args.batch_size * args.grad_accum))
+    total = math.ceil(steps_per_epoch * args.epochs)
+    print(f"{total} optimizer steps ahead ({steps_per_epoch} per epoch x {args.epochs} epochs, "
+          f"effective batch {args.batch_size * args.grad_accum}).")
+    print(f"loss every {cfg.logging_steps} steps | eval every {cfg.eval_steps} | "
+          f"checkpoint every {cfg.save_steps} steps")
+    print("watch it with:  tail -f /workspace/train.log", flush=True)
 
     trainer.train()
     final = args.output_dir / "final"
