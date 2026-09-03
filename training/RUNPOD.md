@@ -52,10 +52,25 @@ python -c "import torch; print(torch.__version__)"
 else:
 
 ```bash
-pip install --upgrade torch torchvision
-pip install --upgrade --force-reinstall bitsandbytes
-python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+# upgrade the whole torch family together, then anything compiled against it
+python -m pip install --upgrade torch torchvision torchaudio
+python -m pip install --upgrade --force-reinstall bitsandbytes
+
+python -c "
+import torch, torchaudio, torchvision, bitsandbytes, transformers
+print(torch.__version__, torchaudio.__version__, torchvision.__version__)
+print(torch.cuda.is_available(), torch.cuda.get_device_name(0))
+"
 ```
+
+Use `python -m pip`, not bare `pip` — these images sometimes have a `pip` that
+targets a different prefix than the interpreter that runs your code.
+
+**Upgrade the family together.** `torchvision`, `torchaudio` and `bitsandbytes`
+all ship compiled extensions linked against a specific torch build. Leave one
+behind and it fails at import with `undefined symbol: _ZNK5torch...` — see
+troubleshooting. `transformers` imports `torchaudio` even for a text-only model,
+so it is not optional.
 
 Qwen3.6's `qwen3_5` architecture only exists in recent `transformers`, and recent
 `transformers` requires torch >= 2.5. On an older torch it disables its PyTorch
@@ -301,9 +316,18 @@ usually preceded by `Disabling PyTorch because PyTorch >= 2.5 is required but
 found 2.4.x`. The torch version is too old for `transformers`; the `NameError` is
 a downstream symptom. Fix with the torch upgrade in step 2.
 
-**`bitsandbytes` import error** — `pip install -U bitsandbytes`. After any torch
-upgrade, use `pip install --upgrade --force-reinstall bitsandbytes` so it rebinds
-to the new torch.
+**`OSError: ... undefined symbol: _ZNK5torch8autograd4Node4nameEv`** (or any
+`undefined symbol` from a `.so`). A compiled extension is still linked against
+the old torch. Reinstall it:
+
+```bash
+python -m pip install --upgrade torchaudio torchvision
+python -m pip install --upgrade --force-reinstall bitsandbytes
+```
+
+**`bitsandbytes` import error** — `python -m pip install --upgrade
+--force-reinstall bitsandbytes`. Do this after any torch upgrade so it rebinds to
+the new torch, otherwise it fails when the 4-bit quantizer first loads.
 
 **Loss starts near 0.1** — the mask is letting the model see the answer. Stop and
 send me the masking block.
