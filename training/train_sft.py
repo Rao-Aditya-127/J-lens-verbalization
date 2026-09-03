@@ -50,6 +50,12 @@ def main() -> None:
     p.add_argument("--batch-size", type=int, default=4)
     p.add_argument("--grad-accum", type=int, default=4)
     p.add_argument("--max-seq-len", type=int, default=1024)
+    # Qwen3.6's vocabulary is 248,320 tokens, so the logits tensor is ~2 GB at
+    # batch 4 and doubles in the backward pass. Liger's fused cross-entropy never
+    # materialises it. Off by default because it silently requires liger-kernel to
+    # support this architecture -- turn it on if the run OOMs.
+    p.add_argument("--liger", action="store_true",
+                   help="fused cross-entropy via liger-kernel; cuts activation memory")
     p.add_argument("--track", choices=["auto", "wandb", "tensorboard", "none"], default="auto",
                    help="auto = wandb if WANDB_API_KEY is set, else none")
     p.add_argument("--run-name", default=None, help="name shown in the tracker")
@@ -110,6 +116,7 @@ def main() -> None:
         save_steps=200,
         save_total_limit=3,
         bf16=True,
+        use_liger_kernel=args.liger,
         gradient_checkpointing=True,
         gradient_checkpointing_kwargs={"use_reentrant": False},
         max_length=args.max_seq_len,
