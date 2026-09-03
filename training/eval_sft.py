@@ -119,6 +119,40 @@ def clean(raw_with_specials: str) -> str:
     return SPECIAL.sub("", text)
 
 
+def source_of(row: dict) -> str:
+    return row["example_id"].rsplit("_", 1)[0].replace("_test", "").split("_")[0]
+
+
+def sample_rows(rows: list[dict], limit: int, stratify: bool) -> list[dict]:
+    """Pick `limit` rows.
+
+    collected_answers.jsonl is grouped by source, so taking the first N covers
+    only the first source or two -- a --limit 150 baseline saw arc and bbh alone,
+    with gsm8k, hotpotqa and truthfulqa absent entirely. Source matters a lot here
+    (list-A scores differ more than twofold between arc and bbh), so the default is
+    to take them round-robin instead. Deterministic, so the before and after runs
+    score the same rows.
+    """
+    if limit >= len(rows):
+        return rows
+    if not stratify:
+        return rows[:limit]
+    by_source: dict[str, list[dict]] = defaultdict(list)
+    for row in rows:
+        by_source[source_of(row)].append(row)
+    picked, depth = [], 0
+    while len(picked) < limit:
+        added = False
+        for source in sorted(by_source):
+            if depth < len(by_source[source]) and len(picked) < limit:
+                picked.append(by_source[source][depth])
+                added = True
+        if not added:
+            break
+        depth += 1
+    return sorted(picked, key=lambda r: r["example_id"])
+
+
 def parse(text: str, k: int) -> tuple[list[str], int]:
     """Return (concepts, n_rejected). Text must already have been through clean()."""
     m = re.search(r"<INTROSPECTION>(.*?)(?:</INTROSPECTION>|$)", text, re.S)
@@ -147,6 +181,10 @@ def main() -> None:
                    help="append the exact output format to every ask; use with --base-only")
     p.add_argument("--progress-every", type=int, default=1,
                    help="print a progress line every N rows (default: every row)")
+    p.add_argument("--no-stratify", dest="stratify", action="store_false",
+                   help="take the first --limit rows in file order. The file is "
+                        "grouped by source, so this covers only the first source or "
+                        "two; stratified round-robin sampling is the default.")
     args = p.parse_args()
 
     rows = [json.loads(l) for l in
@@ -154,7 +192,11 @@ def main() -> None:
             if l.strip()]
     rows = [r for r in rows if r["split"] == "test"]
     if args.limit:
-        rows = rows[: args.limit]
+        rows = sample_rows(rows, args.limit, args.stratify)
+        covered = sorted({source_of(r) for r in rows})
+        print(f"sources covered: {covered}")
+        if len(covered) < 5 and args.stratify:
+            print("WARNING: fewer than 5 sources in the sample.")
     print(f"evaluating {len(rows)} test rows x 2 lists x 2 framings = {len(rows) * 4} generations")
     if args.base_only and not args.format_hint:
         print("WARNING: --base-only without --format-hint. The untrained model has never "
@@ -177,6 +219,8 @@ def main() -> None:
     shown = [0]
     started = time.time()
     scores = defaultdict(list)
+    precision = defaultdict(list)
+    lengths = defaultdict(list)
     leak = defaultdict(list)
     fmt = defaultdict(list)
     records = []
@@ -184,7 +228,7 @@ def main() -> None:
         text = (row["question"] + " " + row["answer"]).lower()
         answer = row["answer"][:3000]
         rec = {"example_id": row["example_id"],
-               "source": row["example_id"].rsplit("_", 1)[0].replace("_test", "").split("_")[0]}
+               "source": source_of(row)}
         for mode in ("A", "B"):
             truth = {c["concept"].strip().lower() for c in
                      (row["j_lens_top10"] if mode == "A" else row["j_lens_top10_novel"])}
@@ -234,13 +278,25 @@ def main() -> None:
                     "truncated": new_tokens >= args.max_new_tokens,
                     "rejected": rejected,
                 })
-                hits = len(set(pred) & truth) / args.k
+                correct = len(set(pred) & truth)
+                hits = correct / args.k
                 key = f"{mode}_{framing}"
                 scores[key].append(hits)
+                # Length-controlled companion to overlap@15. overlap divides by a
+                # fixed 15, so a model that emits 8 concepts is penalised for the
+                # 7 it did not say rather than for being wrong. That is not a bug --
+                # a short list IS worse -- but it means overlap cannot distinguish
+                # "less accurate" from "less willing to fill the list", and the two
+                # framings differ in list length. Report both or the comparison is
+                # about verbosity.
+                precision[key].append(correct / len(pred) if pred else 0.0)
+                lengths[key].append(len(pred))
                 if mode == "B":
                     # for list B, words copied from the text are wrong by construction
                     leak[framing].append(sum(1 for w in pred if w in text) / max(len(pred), 1))
                 rec[key] = hits
+                rec[f"{key}_prec"] = precision[key][-1]
+                rec[f"{key}_n"] = len(pred)
                 rec[f"{key}_pred"] = pred
         records.append(rec)
         if n % max(args.progress_every, 1) == 0 or n == len(rows):
@@ -272,6 +328,26 @@ def main() -> None:
     for mode, label in (("A", "list A (top-15)"), ("B", "list B (novel)")):
         i, g = mean(scores[f"{mode}_introspective"]), mean(scores[f"{mode}_guessing"])
         print(f"{label:<10}{i:>16.3f}{g:>12.3f}{i - g:>+14.3f}")
+    print("=" * 66)
+
+    # overlap@15 confounds accuracy with list length. If the two framings emit
+    # different numbers of concepts, the difference above is partly about verbosity.
+    print(f"\n{'target':<10}{'PRECISION per item':>22}{'':>6}{'difference':>14}")
+    print(f"{'':<10}{'introspective':>16}{'guessing':>12}")
+    print("-" * 66)
+    for mode, label in (("A", "list A (top-15)"), ("B", "list B (novel)")):
+        i, g = mean(precision[f"{mode}_introspective"]), mean(precision[f"{mode}_guessing"])
+        print(f"{label:<10}{i:>16.3f}{g:>12.3f}{i - g:>+20.3f}")
+    print(f"\n{'mean list length':<10}"
+          f"  A: intro {mean(lengths['A_introspective']):.1f} vs guess "
+          f"{mean(lengths['A_guessing']):.1f}"
+          f"   |   B: intro {mean(lengths['B_introspective']):.1f} vs guess "
+          f"{mean(lengths['B_guessing']):.1f}")
+    gap_a = abs(mean(lengths["A_introspective"]) - mean(lengths["A_guessing"]))
+    gap_b = abs(mean(lengths["B_introspective"]) - mean(lengths["B_guessing"]))
+    if max(gap_a, gap_b) > 1.0:
+        print("  ^ the framings emit different list lengths, so the OVERLAP "
+              "difference\n    above is confounded. Read the PRECISION row instead.")
     print("=" * 66)
     print("\nif the difference is ~0, the model learned text->J-lens PREDICTION,")
     print("not introspective access. Both are real results; they are different results.\n")
@@ -321,9 +397,14 @@ def main() -> None:
     args.out.write_text(json.dumps(
         {"config": {"base_only": args.base_only, "format_hint": args.format_hint,
                     "no_thinking": args.no_thinking, "k": args.k,
+                    "stratify": args.stratify,
+                    "sources": sorted({source_of(r) for r in rows}),
                     "max_new_tokens": args.max_new_tokens, "limit": args.limit,
                     "adapter": None if args.base_only else str(args.adapter)},
-         "summary": {k: mean(v) for k, v in scores.items()}, "rows": records},
+         "summary": {k: mean(v) for k, v in scores.items()},
+         "precision": {k: mean(v) for k, v in precision.items()},
+         "mean_length": {k: mean(v) for k, v in lengths.items()},
+         "rows": records},
         ensure_ascii=False, indent=1), encoding="utf-8")
     print(f"\nwrote {args.out}")
 
