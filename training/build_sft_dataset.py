@@ -102,7 +102,16 @@ def split_prompt_completion(tokenizer, messages: list[dict]) -> tuple[str, str]:
             f"  prompt tail: {prompt[-120:]!r}\n"
             f"  full  same : {full[:len(prompt)][-120:]!r}\n"
             "Run training/check_template.py and compare the two renders.")
-    return prompt, full[len(prompt):]
+
+    # TRL appends the EOS itself ("Adding EOS to train dataset"). The full render
+    # already ends with one, so leaving it here trains the model to emit the turn
+    # terminator twice. Harmless at generation, which stops at the first, but it is
+    # a train/inference mismatch and costs a token of loss on every example.
+    completion = full[len(prompt):].rstrip()
+    eos = tokenizer.eos_token
+    if eos and completion.endswith(eos):
+        completion = completion[: -len(eos)].rstrip()
+    return prompt, completion
 
 
 def main() -> None:

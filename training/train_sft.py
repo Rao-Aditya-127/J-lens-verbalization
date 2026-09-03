@@ -139,6 +139,11 @@ def main() -> None:
     p.add_argument("--track", choices=["auto", "wandb", "tensorboard", "none"], default="auto",
                    help="auto = wandb if WANDB_API_KEY is set, else none")
     p.add_argument("--run-name", default=None, help="name shown in the tracker")
+    # Scoring all 608 validation examples takes ~3.4 min, and at eval_steps=100 over
+    # a 3-epoch run that is ~37 min of GPU spent on a number a subset estimates just
+    # as well. The subset is fixed, so the curve stays comparable across runs.
+    p.add_argument("--val-subset", type=int, default=256,
+                   help="validation examples used for in-training eval (0 = all)")
     args = p.parse_args()
 
     # A rented pod is ephemeral: anything written locally dies with it. Cloud
@@ -159,6 +164,8 @@ def main() -> None:
     if args.smoke:
         train, val = train.select(range(200)), val.select(range(32))
         args.epochs, args.output_dir = 1.0, args.output_dir.with_name("smoke")
+    elif args.val_subset and args.val_subset < len(val):
+        val = val.shuffle(seed=17).select(range(args.val_subset))
     print(f"train {len(train)} | validation {len(val)}")
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
