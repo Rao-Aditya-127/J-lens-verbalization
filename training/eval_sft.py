@@ -77,22 +77,45 @@ FORMAT_HINT = (
 )
 
 LINE = re.compile(r"^\s*\d+[.)]\s*(.+?)\s*$")
-# Qwen3.6 is a thinking model. Reasoning has to be stripped before parsing or
-# numbered lines inside it get scraped as though they were the answer.
+# Qwen3.6 reasons by default. The reasoning is numbered markdown, so without
+# stripping it the parser scrapes headings like "1. **Deconstruct the request:**"
+# and reports them as concepts. NOTE: decode with skip_special_tokens=False, or
+# the <think> tags are removed and the reasoning text is left behind undelimited.
 THINK = re.compile(r"<think>.*?</think>", re.S)
 OPEN_THINK = re.compile(r"<think>.*", re.S)
+SPECIAL = re.compile(r"<\|[^|]*\|>")
+
+# Every one of the 114,000 concepts in the dataset is <= 18 characters and none
+# contains a space. Anything outside that is not a concept the model could be
+# right about, so it is a parse artefact and must not enter the predictions.
+MAX_CONCEPT_CHARS = 24
 
 
-def parse(text: str, k: int) -> list[str]:
-    text = THINK.sub("", text)
+def plausible(word: str) -> bool:
+    return (0 < len(word) <= MAX_CONCEPT_CHARS
+            and " " not in word
+            and "**" not in word
+            and not word.endswith(":")
+            and not word.startswith("<"))
+
+
+def clean(raw_with_specials: str) -> str:
+    """Strip reasoning, then special tokens, leaving only the model's answer."""
+    text = THINK.sub("", raw_with_specials)
     if "<INTROSPECTION>" not in text:
-        # an unclosed <think> means generation ran out of budget mid-reasoning:
-        # everything after it is reasoning, not an answer
+        # unclosed <think>: generation ran out of budget mid-reasoning, so
+        # everything after the tag is reasoning and none of it is an answer
         text = OPEN_THINK.sub("", text)
+    return SPECIAL.sub("", text)
+
+
+def parse(text: str, k: int) -> tuple[list[str], int]:
+    """Return (concepts, n_rejected). Text must already have been through clean()."""
     m = re.search(r"<INTROSPECTION>(.*?)(?:</INTROSPECTION>|$)", text, re.S)
     block = m.group(1) if m else text
     out = [x.group(1).strip().lower() for x in (LINE.match(l) for l in block.splitlines()) if x]
-    return [w for w in out if w and not w.startswith("<")][:k]
+    good = [w for w in out if plausible(w)]
+    return good[:k], len(out) - len(good)
 
 
 def main() -> None:
@@ -102,8 +125,12 @@ def main() -> None:
     p.add_argument("--k", type=int, default=15)
     p.add_argument("--out", type=Path, default=REPO / "training" / "eval_results.json")
     p.add_argument("--base-only", action="store_true", help="skip the adapter, score the base model")
-    p.add_argument("--max-new-tokens", type=int, default=160,
-                   help="raise it if the model reasons before answering")
+    p.add_argument("--max-new-tokens", type=int, default=512,
+                   help="160 is not enough while thinking is on; see --no-thinking")
+    p.add_argument("--no-thinking", action="store_true",
+                   help="enable_thinking=False. Qwen3.6 reasons by default and the card "
+                        "suggests 32k output budgets, which we cannot afford. MUST match "
+                        "between the baseline run and the post-training run.")
     p.add_argument("--show-raw", type=int, default=0,
                    help="print the first N raw generations verbatim, then carry on")
     p.add_argument("--format-hint", action="store_true",
@@ -156,28 +183,35 @@ def main() -> None:
                     {"role": "user", "content": ASK[(mode, framing)]
                      + (FORMAT_HINT if args.format_hint else "")},
                 ]
-                prompt = tok.apply_chat_template(chat, tokenize=False, add_generation_prompt=True)
+                prompt = tok.apply_chat_template(
+                    chat, tokenize=False, add_generation_prompt=True,
+                    **({"enable_thinking": False} if args.no_thinking else {}))
                 inputs = tok(prompt, return_tensors="pt").to(model.device)
                 with torch.no_grad():
                     out = model.generate(**inputs, max_new_tokens=args.max_new_tokens,
                                          do_sample=False, pad_token_id=tok.pad_token_id)
                 new_tokens = out[0].shape[0] - inputs["input_ids"].shape[1]
-                raw = tok.decode(out[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
-                pred = parse(raw, args.k)
+                # skip_special_tokens=False on purpose: it would delete the <think>
+                # tags and leave the reasoning text behind with no delimiter to strip
+                raw_full = tok.decode(out[0][inputs["input_ids"].shape[1]:],
+                                      skip_special_tokens=False)
+                raw = clean(raw_full)
+                pred, rejected = parse(raw, args.k)
                 if shown[0] < args.show_raw:
                     shown[0] += 1
                     print("\n" + "-" * 66)
                     print(f"RAW {shown[0]}  mode={mode}  framing={framing}  "
                           f"{new_tokens} new tokens")
                     print("-" * 66)
-                    print(raw)
+                    print(raw_full)
                     print("-" * 66)
-                    print(f"parsed {len(pred)}: {pred}", flush=True)
+                    print(f"parsed {len(pred)}: {pred}")
+                    print(f"rejected as non-concepts: {rejected}", flush=True)
                 # Did it actually learn the format? Count what it emitted BEFORE
                 # truncation, and whether it produced a well-formed block. A tidy
                 # score can hide a model that emits 9 concepts or never closes the
                 # tag, so measure this rather than assuming.
-                emitted = len(parse(raw, 999))
+                emitted = len(parse(raw, 999)[0])
                 fmt[f"{mode}_{framing}"].append({
                     "n": emitted,
                     "exact15": emitted == args.k,
@@ -185,6 +219,7 @@ def main() -> None:
                     "closed": "</INTROSPECTION>" in raw,
                     "distinct": len(set(pred)) == len(pred),
                     "truncated": new_tokens >= args.max_new_tokens,
+                    "rejected": rejected,
                 })
                 hits = len(set(pred) & truth) / args.k
                 key = f"{mode}_{framing}"
@@ -243,6 +278,11 @@ def main() -> None:
         print("  short lists lose recall; long ones are truncated to 15 by the parser")
     else:
         print("  every generation emitted exactly 15 -- format fully learned")
+    bad = sum(x["rejected"] for v in fmt.values() for x in v)
+    if bad:
+        print(f"  {bad} numbered lines were rejected as impossible concepts "
+              f"(>{MAX_CONCEPT_CHARS} chars, containing a space, or markdown) -- "
+              f"these are reasoning artefacts, not predictions")
     trunc = sum(1 for v in fmt.values() for x in v if x["truncated"])
     if trunc:
         print(f"  {trunc} generations hit the {args.max_new_tokens}-token limit and were cut off "
@@ -261,6 +301,7 @@ def main() -> None:
 
     args.out.write_text(json.dumps(
         {"config": {"base_only": args.base_only, "format_hint": args.format_hint,
+                    "no_thinking": args.no_thinking, "k": args.k,
                     "max_new_tokens": args.max_new_tokens, "limit": args.limit,
                     "adapter": None if args.base_only else str(args.adapter)},
          "summary": {k: mean(v) for k, v in scores.items()}, "rows": records},
