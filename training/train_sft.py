@@ -109,7 +109,15 @@ def build_trainer(**kwargs):
 def load_split(name: str) -> Dataset:
     path = DATA / f"sft_{name}.jsonl"
     rows = [json.loads(line) for line in path.open(encoding="utf-8") if line.strip()]
-    return Dataset.from_list([{"messages": r["messages"]} for r in rows])
+    if not rows or "completion" not in rows[0]:
+        raise SystemExit(
+            f"{path.name} has no prompt/completion fields. Rebuild it:\n"
+            "  python training/build_sft_dataset.py\n"
+            "TRL applies completion_only_loss to prompt-completion datasets ONLY. "
+            "Given a messages dataset it trains on every token without complaining, "
+            "and the resulting loss curve looks better than the correct one.")
+    return Dataset.from_list(
+        [{"prompt": r["prompt"], "completion": r["completion"]} for r in rows])
 
 
 def main() -> None:
@@ -256,10 +264,22 @@ def main() -> None:
     print("=" * 70)
     print(tokenizer.decode([ids[i] for i in kept]))
     print("=" * 70)
+    share = len(kept) / len(ids)
     print(f"{len(kept)} of {len(ids)} tokens are loss-bearing "
-          f"({100 * len(kept) / len(ids):.0f}%) -- expect roughly 10-20%")
+          f"({100 * share:.0f}%) -- expect roughly 10-20%")
     if not kept:
         raise SystemExit("no loss-bearing tokens: the completion mask is wrong, stopping")
+    # A mask that is too WIDE is the dangerous one: it trains fine, converges
+    # faster than the correct setup, and produces a healthier-looking curve while
+    # learning to copy the question and answer instead of reporting concepts.
+    # Observed once at 100% when the dataset was in messages format.
+    if share > 0.5:
+        raise SystemExit(
+            f"{100 * share:.0f}% of tokens are loss-bearing. The block above should "
+            "contain the concept list ALONE -- if it shows the system prompt, the "
+            "question or the answer, the mask is not being applied.\n"
+            "Rebuild the dataset with  python training/build_sft_dataset.py  and "
+            "check that it reports a completion share of 10-20%.")
     print("=" * 70 + "\n")
 
     steps_per_epoch = math.ceil(len(train) / (args.batch_size * args.grad_accum))

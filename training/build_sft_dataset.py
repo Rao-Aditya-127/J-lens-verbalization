@@ -10,8 +10,13 @@ instruction says which is being asked for:
 The mode MUST be in the prompt. Without it the same input would carry two
 different correct answers and the model would learn to average them.
 
-Output is chat-format JSONL. The final assistant turn is the target; everything
-before it is context that should be masked out of the loss (see train_sft.py).
+Output is a PROMPT-COMPLETION dataset: each row carries the fully-rendered chat
+prefix in "prompt" and the target block in "completion". This is deliberate. TRL
+1.x applies completion_only_loss to prompt-completion datasets ONLY -- hand it a
+"messages" dataset and it trains on every token, silently, with a healthier
+looking loss curve than the correct setup produces. Rendering the split here
+makes the boundary explicit and checkable instead of a property of whichever TRL
+version happens to be installed.
 
     python training/build_sft_dataset.py
 """
@@ -23,9 +28,12 @@ import random
 from collections import Counter
 from pathlib import Path
 
+from transformers import AutoTokenizer
+
 REPO = Path(__file__).resolve().parents[1]
 SOURCE = REPO / "dataset" / "jlens" / "collected_answers.jsonl"
 OUT_DIR = REPO / "training" / "data"
+MODEL_ID = "Qwen/Qwen3.6-27B"
 
 SYSTEM = "You report the concepts most active in your own internal computation."
 
@@ -61,24 +69,40 @@ def format_target(concepts: list[dict]) -> str:
     return f"<INTROSPECTION>\nConcepts:\n{body}\n</INTROSPECTION>"
 
 
-def build_example(row: dict, mode: str) -> dict:
+def messages_for(row: dict, mode: str) -> list[dict]:
     concepts = row["j_lens_top10"] if mode == "A" else row["j_lens_top10_novel"]
     answer = row["answer"]
     if len(answer) > MAX_ANSWER_CHARS:
         answer = answer[:MAX_ANSWER_CHARS].rstrip() + " [...]"
-    return {
-        "example_id": row["example_id"],
-        "mode": mode,
-        "split": row["split"],
-        "source": row["example_id"].rsplit("_", 1)[0].replace("_test", "").split("_")[0],
-        "messages": [
-            {"role": "system", "content": SYSTEM},
-            {"role": "user", "content": row["question"]},
-            {"role": "assistant", "content": answer},
-            {"role": "user", "content": ASK_A if mode == "A" else ASK_B},
-            {"role": "assistant", "content": format_target(concepts)},
-        ],
-    }
+    return [
+        {"role": "system", "content": SYSTEM},
+        {"role": "user", "content": row["question"]},
+        {"role": "assistant", "content": answer},
+        {"role": "user", "content": ASK_A if mode == "A" else ASK_B},
+        {"role": "assistant", "content": format_target(concepts)},
+    ]
+
+
+def split_prompt_completion(tokenizer, messages: list[dict]) -> tuple[str, str]:
+    """Render the chat, then cut it where the target begins.
+
+    The prefix is rendered with enable_thinking=False so it ends at
+    ...<|im_start|>assistant\\n<think>\\n\\n</think>\\n\\n -- byte-identical to what
+    eval_sft.py --no-thinking sends at generation time. Deriving the completion by
+    subtraction rather than writing it out guarantees prompt + completion is
+    exactly the full render, with no seam.
+    """
+    prompt = tokenizer.apply_chat_template(
+        messages[:-1], tokenize=False, add_generation_prompt=True, enable_thinking=False)
+    full = tokenizer.apply_chat_template(messages, tokenize=False)
+    if not full.startswith(prompt):
+        raise SystemExit(
+            "The generation prefix is not a prefix of the full render, so there is "
+            "no clean point to mask at.\n"
+            f"  prompt tail: {prompt[-120:]!r}\n"
+            f"  full  same : {full[:len(prompt)][-120:]!r}\n"
+            "Run training/check_template.py and compare the two renders.")
+    return prompt, full[len(prompt):]
 
 
 def main() -> None:
@@ -96,10 +120,21 @@ def main() -> None:
     if bad:
         raise SystemExit(f"{len(bad)} rows do not have 15 entries in both lists, e.g. {bad[:3]}")
 
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
+
     by_split: dict[str, list[dict]] = {}
     for row in rows:
         for mode in ("A", "B"):
-            by_split.setdefault(row["split"], []).append(build_example(row, mode))
+            messages = messages_for(row, mode)
+            prompt, completion = split_prompt_completion(tokenizer, messages)
+            by_split.setdefault(row["split"], []).append({
+                "example_id": row["example_id"],
+                "mode": mode,
+                "split": row["split"],
+                "source": row["example_id"].rsplit("_", 1)[0].replace("_test", "").split("_")[0],
+                "prompt": prompt,
+                "completion": completion,
+            })
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     rng = random.Random(args.seed)
@@ -117,12 +152,18 @@ def main() -> None:
         print(f"  {path.name:<22} {len(examples):>5} examples   "
               f"A={modes['A']} B={modes['B']}   sources={dict(sorted(srcs.items()))}")
 
-    sample = next(iter(by_split["train"]))
-    print("\nexample (mode %s, %s):" % (sample["mode"], sample["example_id"]))
-    for m in sample["messages"]:
-        text = m["content"] if len(m["content"]) < 220 else m["content"][:220] + " ..."
-        print(f"  [{m['role']:<9}] {text}")
-    print("\n  ^ the final assistant turn is the training target; everything above is masked")
+    # Show the actual boundary. If the completion carries any of the question or
+    # the answer, the mask is wrong and every number downstream is meaningless.
+    sample = by_split["train"][0]
+    p_tok = len(tokenizer(sample["prompt"])["input_ids"])
+    c_tok = len(tokenizer(sample["completion"])["input_ids"])
+    print(f"\nexample (mode {sample['mode']}, {sample['example_id']}):")
+    print(f"\n  PROMPT ({p_tok} tokens, masked out of the loss) ends with:")
+    print("   ", repr(sample["prompt"][-160:]))
+    print(f"\n  COMPLETION ({c_tok} tokens, THE ONLY THING TRAINED ON):")
+    print("   ", repr(sample["completion"]))
+    print(f"\n  completion is {100 * c_tok / (p_tok + c_tok):.0f}% of the sequence "
+          f"-- expect roughly 10-20%")
 
 
 if __name__ == "__main__":
