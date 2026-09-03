@@ -14,6 +14,7 @@ re-learning the question and answer the model was already given.
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import math
 import os
@@ -81,6 +82,28 @@ def build_config(wanted: dict) -> tuple[SFTConfig, dict]:
               f"{sorted(dropped)}; continuing without them. None affects what is "
               f"learned -- they control warmup, logging cadence and checkpointing.")
     return SFTConfig(**kept), {k: wanted[k] for k in wanted if k not in dropped}
+
+
+# Same treatment for SFTTrainer: its signature also moves between releases, and
+# peft_config in particular must land or the run would full-finetune 28B params.
+TRAINER_CRITICAL = {"model", "args", "train_dataset", "peft_config"}
+
+
+def build_trainer(**kwargs):
+    params = inspect.signature(SFTTrainer.__init__).parameters
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return SFTTrainer(**kwargs)
+
+    kept = {k: v for k, v in kwargs.items() if k in params}
+    dropped = sorted(set(kwargs) - set(kept))
+    missing = sorted(TRAINER_CRITICAL.intersection(dropped))
+    if missing:
+        raise SystemExit(
+            f"SFTTrainer does not accept {missing}, which the run depends on.\n"
+            f"Accepted: {sorted(params)}")
+    if dropped:
+        print(f"NOTE: SFTTrainer does not accept {dropped}; continuing without them.")
+    return SFTTrainer(**kept)
 
 
 def load_split(name: str) -> Dataset:
@@ -153,6 +176,30 @@ def main() -> None:
                         "gate_proj", "up_proj", "down_proj"],
     )
 
+    # How the base model is loaded. This MUST reach from_pretrained: without the
+    # quantization_config the 28B model loads in bf16 at ~56 GB and OOMs on a 48 GB
+    # card. trl moved this between SFTTrainer and SFTConfig across versions, so ask
+    # rather than assume, and refuse to start if neither accepts it.
+    model_init = {
+        "quantization_config": quant,
+        "dtype": torch.bfloat16,        # torch_dtype is deprecated in transformers 5
+        "device_map": "auto",
+        "attn_implementation": "sdpa",
+    }
+    cfg_fields = set(getattr(SFTConfig, "__dataclass_fields__", {}))
+    trainer_params = inspect.signature(SFTTrainer.__init__).parameters
+    trainer_extra = {}
+    if "model_init_kwargs" in cfg_fields:
+        pass                            # placed into `wanted` below
+    elif "model_init_kwargs" in trainer_params:
+        trainer_extra["model_init_kwargs"] = model_init
+    else:
+        raise SystemExit(
+            "Neither SFTConfig nor SFTTrainer accepts model_init_kwargs, so the "
+            "4-bit quantization config cannot reach from_pretrained. Loading in "
+            "bf16 instead would need ~56 GB and OOM. Load the model explicitly "
+            "with AutoModelForCausalLM.from_pretrained and pass the object in.")
+
     wanted = {
         "output_dir": str(args.output_dir),
         "num_train_epochs": args.epochs,
@@ -184,21 +231,18 @@ def main() -> None:
         "logging_first_step": True,
         "seed": 17,
     }
+    if "model_init_kwargs" in cfg_fields:
+        wanted["model_init_kwargs"] = model_init
     cfg, wanted = build_config(wanted)
 
-    trainer = SFTTrainer(
+    trainer = build_trainer(
         model=MODEL_ID,
         args=cfg,
         train_dataset=train,
         eval_dataset=val,
         processing_class=tokenizer,
         peft_config=peft_config,
-        model_init_kwargs={
-            "quantization_config": quant,
-            "torch_dtype": torch.bfloat16,
-            "device_map": "auto",
-            "attn_implementation": "sdpa",
-        },
+        **trainer_extra,
     )
 
     # Print one fully-rendered example with its label mask before training. This is
