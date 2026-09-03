@@ -35,6 +35,54 @@ MODEL_ID = "Qwen/Qwen3.6-27B"
 TEXT_ONLY_CLASS = "Qwen3_5ForCausalLM"
 
 
+# TRL and transformers rename and drop TrainingArguments fields between releases,
+# and an unknown keyword is a hard TypeError. Rather than pin versions we cannot
+# test against, resolve each setting against what this install actually exposes.
+# Renames are tried in order; anything unavailable is reported, never dropped
+# silently -- a quietly missing completion_only_loss would invalidate the run.
+ALIASES = {
+    "max_length": ("max_length", "max_seq_length"),
+    "eval_strategy": ("eval_strategy", "evaluation_strategy"),
+    "logging_first_step": ("logging_first_step",),
+}
+
+# Without these the run is not the experiment we designed, so stop instead.
+CRITICAL = {
+    "output_dir", "num_train_epochs", "per_device_train_batch_size",
+    "gradient_accumulation_steps", "learning_rate", "max_length",
+    "completion_only_loss", "bf16",
+}
+
+
+def build_config(wanted: dict) -> tuple[SFTConfig, dict]:
+    fields = set(getattr(SFTConfig, "__dataclass_fields__", {}))
+    if not fields:  # not a dataclass in this version: pass everything through
+        return SFTConfig(**wanted), wanted
+
+    kept, dropped = {}, {}
+    for key, value in wanted.items():
+        for candidate in ALIASES.get(key, (key,)):
+            if candidate in fields:
+                kept[candidate] = value
+                break
+        else:
+            dropped[key] = value
+
+    missing = sorted(CRITICAL & set(dropped))
+    if missing:
+        raise SystemExit(
+            f"SFTConfig in trl does not accept {missing}, which the experiment "
+            f"depends on. Do not work around this by removing them -- the run "
+            f"would not be the one we designed.\nAvailable fields: "
+            + ", ".join(sorted(fields)))
+
+    if dropped:
+        print(f"NOTE: this trl/transformers build does not accept "
+              f"{sorted(dropped)}; continuing without them. None affects what is "
+              f"learned -- they control warmup, logging cadence and checkpointing.")
+    return SFTConfig(**kept), {k: wanted[k] for k in wanted if k not in dropped}
+
+
 def load_split(name: str) -> Dataset:
     path = DATA / f"sft_{name}.jsonl"
     rows = [json.loads(line) for line in path.open(encoding="utf-8") if line.strip()]
@@ -69,6 +117,9 @@ def main() -> None:
     if args.track == "wandb":
         os.environ.setdefault("WANDB_PROJECT", "jlens-verbalization")
     run_name = args.run_name or args.output_dir.name
+    import transformers, trl
+    print(f"transformers {transformers.__version__} | trl {trl.__version__} | "
+          f"torch {torch.__version__}")
     print(f"tracking: {args.track}" + (f"  (project jlens-verbalization, run {run_name})"
                                        if args.track == "wandb" else ""))
 
@@ -102,37 +153,38 @@ def main() -> None:
                         "gate_proj", "up_proj", "down_proj"],
     )
 
-    cfg = SFTConfig(
-        output_dir=str(args.output_dir),
-        num_train_epochs=args.epochs,
-        per_device_train_batch_size=args.batch_size,
-        gradient_accumulation_steps=args.grad_accum,
-        learning_rate=args.lr,
-        lr_scheduler_type="cosine",
-        warmup_ratio=0.03,
-        logging_steps=10,
-        eval_strategy="steps",
-        eval_steps=100,
-        save_strategy="steps",
-        save_steps=200,
-        save_total_limit=3,
-        bf16=True,
-        use_liger_kernel=args.liger,
-        gradient_checkpointing=True,
-        gradient_checkpointing_kwargs={"use_reentrant": False},
-        max_length=args.max_seq_len,
+    wanted = {
+        "output_dir": str(args.output_dir),
+        "num_train_epochs": args.epochs,
+        "per_device_train_batch_size": args.batch_size,
+        "gradient_accumulation_steps": args.grad_accum,
+        "learning_rate": args.lr,
+        "lr_scheduler_type": "cosine",
+        "warmup_ratio": 0.03,
+        "logging_steps": 10,
+        "eval_strategy": "steps",
+        "eval_steps": 100,
+        "save_strategy": "steps",
+        "save_steps": 200,
+        "save_total_limit": 3,
+        "bf16": True,
+        "use_liger_kernel": args.liger,
+        "gradient_checkpointing": True,
+        "gradient_checkpointing_kwargs": {"use_reentrant": False},
+        "max_length": args.max_seq_len,
         # Mask everything but the final assistant turn. Targets are only ~14% of
         # each sequence, so without this most of the gradient would go into
         # re-predicting the question and answer already present in the context.
-        completion_only_loss=True,
-        packing=False,          # packing would blur the completion mask across examples
-        report_to=[] if args.track == "none" else [args.track],
-        run_name=run_name,
+        "completion_only_loss": True,
+        "packing": False,       # packing would blur the completion mask across examples
+        "report_to": [] if args.track == "none" else [args.track],
+        "run_name": run_name,
         # trainer_state.json records every logged metric regardless of tracker,
         # so the curves are recoverable even if tracking was off or the pod died.
-        logging_first_step=True,
-        seed=17,
-    )
+        "logging_first_step": True,
+        "seed": 17,
+    }
+    cfg, wanted = build_config(wanted)
 
     trainer = SFTTrainer(
         model=MODEL_ID,
@@ -170,8 +222,9 @@ def main() -> None:
     total = math.ceil(steps_per_epoch * args.epochs)
     print(f"{total} optimizer steps ahead ({steps_per_epoch} per epoch x {args.epochs} epochs, "
           f"effective batch {args.batch_size * args.grad_accum}).")
-    print(f"loss every {cfg.logging_steps} steps | eval every {cfg.eval_steps} | "
-          f"checkpoint every {cfg.save_steps} steps")
+    print(f"loss every {wanted.get('logging_steps', '?')} steps | "
+          f"eval every {wanted.get('eval_steps', '?')} | "
+          f"checkpoint every {wanted.get('save_steps', '?')} steps")
     print("watch it with:  tail -f /workspace/train.log", flush=True)
 
     trainer.train()
