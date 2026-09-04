@@ -28,6 +28,7 @@ results_day*/
 training/runs/
 training/data/
 training/eval_*.json
+eval_*.json
 training/train.log
 *.safetensors
 *.bin
