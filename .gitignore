@@ -21,3 +21,13 @@ report/
 *.bak
 *.tmp
 nohup.out
+
+# Training outputs: adapters, checkpoints and downloaded run results.
+# results_day1/ alone is 647 MB -- these are artefacts, the repo stays code-only.
+results_day*/
+training/runs/
+training/data/
+training/eval_*.json
+training/train.log
+*.safetensors
+*.bin
