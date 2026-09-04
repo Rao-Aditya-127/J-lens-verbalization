@@ -92,6 +92,31 @@ def gaps(rows: list[dict], label: str) -> None:
     print("    rather than willingness to answer.")
 
 
+def agreement(rows: list[dict], label: str, k: int = 15) -> None:
+    """How much do the two framings agree with EACH OTHER, versus with the target?
+
+    The paired difference says the framings score the same. It cannot say whether
+    they score the same by naming the same concepts or different ones that happen
+    to be equally right. If the framings agree with each other far more than
+    either agrees with the lens, the model is running one procedure and ignoring
+    what the prompt claims about introspection.
+    """
+    print(f"\n{label} -- do the two framings produce the SAME list?")
+    print(f"  {'target':<10}{'intro vs guess':>16}{'intro vs lens':>15}"
+          f"{'guess vs lens':>15}{'duplicates':>12}")
+    for mode in ("A", "B"):
+        i, g = f"{mode}_introspective", f"{mode}_guessing"
+        both = [r for r in rows if r.get(f"{i}_n", 0) > 0 and r.get(f"{g}_n", 0) > 0]
+        if not both:
+            continue
+        each_other = mean(len(set(r[i + "_pred"]) & set(r[g + "_pred"])) / k for r in both)
+        dup = mean(1 - len(set(r[i + "_pred"])) / max(len(r[i + "_pred"]), 1) for r in both)
+        print(f"  {'list ' + mode:<10}{each_other:>16.3f}{mean(r[i] for r in both):>15.3f}"
+              f"{mean(r[g] for r in both):>15.3f}{dup:>11.0%}")
+    print("  'duplicates' = share of introspective predictions that repeat an earlier")
+    print("  entry. Repeats collapse under set intersection, so they waste list slots.")
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("before", type=Path, nargs="?",
@@ -131,6 +156,9 @@ def main() -> None:
 
     gaps(before["rows"], "BEFORE")
     gaps(after["rows"], "AFTER")
+
+    agreement(before["rows"], "BEFORE")
+    agreement(after["rows"], "AFTER")
 
 
 if __name__ == "__main__":
