@@ -144,21 +144,26 @@ def install(model, layers: list[int], d_src: dict, d_tgt: dict,
             # live through generation, so the model composes with it, which is what
             # the base-model 48% did (the concept was injected into the answer as it
             # was produced, with 8% leaking into the answer text).
-            if h.shape[1] == 1 and not steer_generated:
+            decoding = h.shape[1] == 1
+            if decoding and not steer_generated:
                 return out
             s_, t_ = src.to(h.device, h.dtype), tgt.to(h.device, h.dtype)
-            # Position 0 is left alone. Its residual norm is an attention sink and
-            # dwarfs every other position, so an intervention scaled by that norm
-            # perturbs it far harder than the rest -- and every later token attends
-            # to it. interp-engine's own lens intervention skips it for this reason.
-            edit = h[:, 1:]
+            # Skip position 0 during PREFILL only. Its residual norm is an attention
+            # sink and dwarfs every other position, so an intervention scaled by that
+            # norm hits it far harder than the rest while every later token attends
+            # to it -- interp-engine's lens intervention skips it for that reason.
+            #
+            # A decode step carries a single position which is NOT position 0, so the
+            # same slice would empty the tensor and silently disable the whole
+            # intervention. It did exactly that, and made --steer-generated a no-op.
+            keep, edit = (h[:, :0], h) if decoding else (h[:, :1], h[:, 1:])
             if mode == "swap":
                 coef = (edit * s_).sum(-1, keepdim=True)
                 edit = edit + coef * (t_ - s_)
             else:
                 norm = edit.norm(dim=-1, keepdim=True)
                 edit = edit + torch.clamp(strength * norm, max=max_fraction * norm) * t_
-            h = torch.cat([h[:, :1], edit], dim=1)
+            h = torch.cat([keep, edit], dim=1)
             return (h, *out[1:]) if isinstance(out, tuple) else h
 
         handles.append(block.register_forward_hook(hook))
