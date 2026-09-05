@@ -78,15 +78,25 @@ def find_token_id(tok, word: str) -> int | None:
     return None
 
 
+# (token_id, layer) -> unit direction. A direction depends only on the token and
+# the layer, never on the row, and every row re-uses the widest dose's layers.
+_DIRECTION_CACHE: dict[tuple[int, int], torch.Tensor] = {}
+
+
 def readout_directions(J: dict, unembed: torch.Tensor, token_id: int,
                        layers: list[int]) -> dict[int, torch.Tensor]:
     """d[layer] = normalize(J[layer].T @ W_U[token]) -- the residual-space direction
     whose presence the lens reads out as this token."""
-    u = unembed[token_id].float()
     out = {}
     for layer in layers:
-        d = J[layer].float().T @ u
-        out[layer] = (d / d.norm()).to(torch.bfloat16)
+        key = (token_id, layer)
+        if key not in _DIRECTION_CACHE:
+            mat = J[layer]
+            # J is loaded on CPU; the unembed sits wherever device_map put it.
+            u = unembed[token_id].to(mat.device, torch.float32)
+            d = mat.float().T @ u
+            _DIRECTION_CACHE[key] = (d / d.norm()).to(torch.bfloat16)
+        out[layer] = _DIRECTION_CACHE[key]
     return out
 
 
