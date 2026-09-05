@@ -188,6 +188,13 @@ def main() -> None:
                         "dose when swap is too weak to register")
     p.add_argument("--strength", type=float, default=0.4,
                    help="steer only: injected norm as a fraction of the residual norm")
+    p.add_argument("--inject-during", choices=["report", "answer"], default="answer",
+                   help="answer = inject while the model composes its answer, then ask "
+                        "for the self-report with NO injection active (Experiment 3's "
+                        "design; leakage into the answer is measured separately). "
+                        "report = inject around the self-report turn itself, which with "
+                        "--steer-generated pushes the token out of the decoder and "
+                        "cannot be told apart from a genuine report.")
     p.add_argument("--steer-generated", action="store_true",
                    help="keep the injection live during generation, not just prefill. "
                         "Off = the concept is present while the conversation is read "
@@ -248,23 +255,19 @@ def main() -> None:
             continue
 
         ask = ASK_REPORT if args.prompt_style == "report" else ASK_DETECT
-        chat = [{"role": "system", "content": SYSTEM},
-                {"role": "user", "content": row["question"]},
-                {"role": "assistant", "content": row["answer"][:3000]},
-                {"role": "user", "content": ask}]
-        prompt = tok.apply_chat_template(chat, tokenize=False, add_generation_prompt=True,
-                                         enable_thinking=False)
-        inputs = tok(prompt, return_tensors="pt").to(model.device)
 
-        for dose in args.doses:
-            layers = list(range(LAYER_MIN, LAYER_MIN + dose))
-            layers = [l for l in layers if l <= LAYER_MAX]
+        def said(text: str) -> bool:
+            return bool(re.search(rf"\b{re.escape(target)}", text, re.I))
+
+        def generate(prompt_text: str, layers) -> str:
+            inputs = tok(prompt_text, return_tensors="pt").to(model.device)
             handles = []
             if layers:
-                d_src = readout_directions(J, unembed, s_id, layers)
-                d_tgt = readout_directions(J, unembed, t_id, layers)
-                handles = install(model, layers, d_src, d_tgt, args.mode,
-                                  args.strength, steer_generated=args.steer_generated)
+                handles = install(model, layers,
+                                  readout_directions(J, unembed, s_id, layers),
+                                  readout_directions(J, unembed, t_id, layers),
+                                  args.mode, args.strength,
+                                  steer_generated=args.steer_generated)
             try:
                 with torch.no_grad():
                     out = model.generate(**inputs, max_new_tokens=args.max_new_tokens,
@@ -273,12 +276,46 @@ def main() -> None:
             finally:
                 for h in handles:
                     h.remove()
-            gen = tok.decode(out[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
+            return tok.decode(out[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
+
+        def render(messages) -> str:
+            return tok.apply_chat_template(messages, tokenize=False,
+                                           add_generation_prompt=True,
+                                           enable_thinking=False)
+
+        for dose in args.doses:
+            layers = [l for l in range(LAYER_MIN, LAYER_MIN + dose) if l <= LAYER_MAX]
+
+            if args.inject_during == "answer":
+                # The concept is live while the model COMPOSES its answer, then removed
+                # before the self-report is asked for. Naming it afterwards is a report
+                # about something that was active, not a token pushed out of the
+                # decoder -- the confound that makes injecting on the report turn
+                # uninterpretable. Leakage into the answer is measured separately: a
+                # detection that only ever occurs alongside leakage is the model
+                # reading its own text, not its own state.
+                answer = generate(render([{"role": "user", "content": row["question"]}]),
+                                  layers)
+                leaked = said(answer)
+                gen = generate(render([
+                    {"role": "system", "content": SYSTEM},
+                    {"role": "user", "content": row["question"]},
+                    {"role": "assistant", "content": answer[:3000]},
+                    {"role": "user", "content": ask}]), [])
+            else:
+                answer, leaked = row["answer"][:3000], False
+                gen = generate(render([
+                    {"role": "system", "content": SYSTEM},
+                    {"role": "user", "content": row["question"]},
+                    {"role": "assistant", "content": answer},
+                    {"role": "user", "content": ask}]), layers)
+
             # Detection is substring-in-generation, not "parsed into the list": it has
             # to work for the base model too, which does not emit the trained format.
-            detected = bool(re.search(rf"\b{re.escape(target)}", gen, re.I))
+            detected = said(gen)
             trials.append({"example_id": row["example_id"], "dose": dose,
-                           "target": target, "source": source, "detected": detected})
+                           "target": target, "source": source, "detected": detected,
+                           "leaked": leaked, "clean": detected and not leaked})
             if shown < args.show and dose == max(args.doses):
                 shown += 1
                 print("-" * 70)
@@ -296,24 +333,30 @@ def main() -> None:
     print("\n" + "=" * 70)
     print(f"DOSE-RESPONSE  ({label}, n={len(rows)} rows)")
     print("=" * 70)
-    print(f"  {'layers swapped':<18}{'detection rate':>16}")
+    print(f"  {'layers':<10}{'detected':>12}{'leaked into':>14}{'clean':>12}")
+    print(f"  {'':<10}{'':>12}{'the answer':>14}{'detection':>12}")
     for dose in args.doses:
-        sub = [t["detected"] for t in trials if t["dose"] == dose]
-        print(f"  {dose:<18}{mean(sub):>15.0%}   ({sum(sub)}/{len(sub)})")
+        at = [t for t in trials if t["dose"] == dose]
+        print(f"  {dose:<10}{mean(t['detected'] for t in at):>11.0%}"
+              f"{mean(t['leaked'] for t in at):>14.0%}"
+              f"{mean(t['clean'] for t in at):>12.0%}")
     print("=" * 70)
+    print("  'clean' = named in the self-report while ABSENT from the answer, so the")
+    print("  model cannot be reading the concept back off its own output.")
     print("\n  0 layers is the control: same prompt, no intervention. A text predictor")
     print("  scores 0 at EVERY dose, because its input never changes. Detection rising")
     print("  with dose is evidence the report tracks the activations.")
 
     out_path = args.out or (REPO / "training" /
                             f"inject_{'base' if args.base_only else 'ft'}"
-                            f"_{args.prompt_style}"
+                            f"_{args.prompt_style}_{args.inject_during}"
                             f"{'_gen' if args.steer_generated else ''}.json")
     out_path.write_text(json.dumps(
         {"config": {"model": label, "rows": len(rows), "doses": args.doses,
                     "prompt_style": args.prompt_style,
                     "mode": args.mode, "strength": args.strength,
                     "steer_generated": args.steer_generated,
+                    "inject_during": args.inject_during,
                     "layer_min": LAYER_MIN, "seed": args.seed},
          "rates": {str(d): mean([t["detected"] for t in trials if t["dose"] == d])
                    for d in args.doses},
