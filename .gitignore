@@ -32,3 +32,6 @@ eval_*.json
 training/train.log
 *.safetensors
 *.bin
+inject_*.json
+training/inject_*.json
+training/jlens_shift.json
