@@ -91,6 +91,10 @@ def main() -> None:
     print(f"  device {model.device} | dtype {model.dtype} | "
           f"quant_method {model.quant_method}")
     print(f"  hooks_available: {model.hooks_available}")
+    if str(model.device) == "cpu":
+        print("\n  WARNING: the model is on CPU. A lens readout there is far too slow to")
+        print("  be useful. Almost always torch lost its CUDA build -- check")
+        print("  torch.cuda.is_available() and that torch.version.cuda matches the driver.")
 
     # The point the lens reads from. If this resolves, the paths line up.
     for layer in (0, 24, 58, model.n_layers - 1):
@@ -102,7 +106,9 @@ def main() -> None:
         print(f"  {mark} resid_post layer {layer:>2}: "
               f"{getattr(mod, '__class__', type(mod)).__name__} / {side}")
 
-    print("\n  points advertised:", [str(s) for s in model.points[:8]], "...")
+    # `points` is a method on some versions and a property on others
+    pts = model.points() if callable(model.points) else model.points
+    print("\n  points advertised:", [str(s) for s in list(pts)[:8]], "...")
 
     if args.skip_lens:
         return
