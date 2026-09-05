@@ -64,8 +64,8 @@ def build_transport(J: dict, transpose: bool):
 
 
 def readout(model, tok, lens_J, prompt_text: str, answer_text: str,
-            transpose: bool, top_n: int = TOP_N) -> list[str]:
-    """Top-K concepts by frequency over answer-token positions, layers 24-58."""
+            transpose: bool, top_n: int = TOP_N, top_k: int = TOP_K) -> list[str]:
+    """Top-k concepts by frequency over answer-token positions, layers 24-58."""
     from interp_engine.lens import layer_logits
 
     prompt_ids = tok(prompt_text, return_tensors="pt")["input_ids"][0]
@@ -98,7 +98,7 @@ def readout(model, tok, lens_J, prompt_text: str, answer_text: str,
                 counts[token] += 1
                 first_pos.setdefault(token, pos)
     ordered = sorted(counts.items(), key=lambda kv: (-kv[1], first_pos[kv[0]], kv[0]))
-    return [t for t, _ in ordered[:TOP_K]]
+    return [t for t, _ in ordered[:top_k]]
 
 
 def main() -> None:
@@ -170,6 +170,42 @@ def main() -> None:
     else:
         print("  Reproduces the API well enough to compare new readouts against the")
         print("  3,800 collected rows.")
+
+    # WHERE does the disagreement live? If it is the fragile low-count tail, overlap
+    # should be near-perfect at top-5 and fall toward the top-15 figure, and the API
+    # concepts we miss should sit well below rank 8 (the uniform expectation for a
+    # 15-item list). If instead it is flat across k and the missed ranks average ~8,
+    # the disagreement is everywhere and the local readout differs structurally.
+    print("\nWHERE THE DISAGREEMENT LIVES")
+    print(f"  {'k':<6}{'mean overlap@k':>18}")
+    missed_ranks: list[int] = []
+    for k in (5, 10, 15):
+        scores = []
+        for row in rows:
+            prompt = tok.apply_chat_template(
+                [{"role": "user", "content": row["question"]}], tokenize=False,
+                add_generation_prompt=True,
+                **({} if thinking else {"enable_thinking": False}))
+            pred = readout(model, tok, J, prompt, row["answer"], transpose, top_k=k)
+            truth = [c["concept"].strip().lower() for c in row["j_lens_top10"]][:k]
+            scores.append(len(set(pred) & set(truth)) / k)
+            if k == TOP_K:
+                got = set(pred)
+                missed_ranks += [i for i, t in enumerate(truth, start=1) if t not in got]
+        print(f"  {k:<6}{sum(scores) / len(scores):>18.3f}")
+
+    if missed_ranks:
+        mean_rank = sum(missed_ranks) / len(missed_ranks)
+        print(f"\n  API concepts the local readout missed: {len(missed_ranks)} "
+              f"of {len(rows) * TOP_K}")
+        print(f"  their mean rank in the API list: {mean_rank:.1f} of 15 "
+              f"(uniform would be 8.0)")
+        if mean_rank > 9.5:
+            print("  -> concentrated in the low-count tail: the readout agrees where the")
+            print("     signal is strong and reshuffles where counts are 1-2.")
+        else:
+            print("  -> spread across the ranking, not just the tail. The local readout")
+            print("     differs structurally and local/API numbers should not be mixed.")
 
     row = rows[0]
     pred = readout(model, tok, J, tok.apply_chat_template(
