@@ -120,7 +120,8 @@ def readout_directions(J: dict, unembed: torch.Tensor, token_id: int,
 
 
 def install(model, layers: list[int], d_src: dict, d_tgt: dict,
-            mode: str, strength: float, max_fraction: float = 0.5) -> list:
+            mode: str, strength: float, max_fraction: float = 0.5,
+            steer_generated: bool = False) -> list:
     """Register prefill-only intervention hooks on the given decoder layers.
 
     swap  -- h += (h . s_hat)(t_hat - s_hat)
@@ -137,7 +138,13 @@ def install(model, layers: list[int], d_src: dict, d_tgt: dict,
 
         def hook(_mod, _inp, out, src=src, tgt=tgt):
             h = out[0] if isinstance(out, tuple) else out
-            if h.shape[1] == 1:          # decode step: leave generated tokens alone
+            # A decode step has one position. Skipping it means the concept is present
+            # while the conversation is ENCODED but absent while the report is
+            # WRITTEN -- the strict, text-matched condition. steer_generated keeps it
+            # live through generation, so the model composes with it, which is what
+            # the base-model 48% did (the concept was injected into the answer as it
+            # was produced, with 8% leaking into the answer text).
+            if h.shape[1] == 1 and not steer_generated:
                 return out
             s_, t_ = src.to(h.device, h.dtype), tgt.to(h.device, h.dtype)
             # Position 0 is left alone. Its residual norm is an attention sink and
@@ -176,6 +183,11 @@ def main() -> None:
                         "dose when swap is too weak to register")
     p.add_argument("--strength", type=float, default=0.4,
                    help="steer only: injected norm as a fraction of the residual norm")
+    p.add_argument("--steer-generated", action="store_true",
+                   help="keep the injection live during generation, not just prefill. "
+                        "Off = the concept is present while the conversation is read "
+                        "but absent while the report is written; on = the model writes "
+                        "with it active, which is closer to what the 48% measured.")
     p.add_argument("--max-new-tokens", type=int, default=384)
     p.add_argument("--seed", type=int, default=17)
     p.add_argument("--collected", type=Path, default=COLLECTED)
@@ -246,7 +258,8 @@ def main() -> None:
             if layers:
                 d_src = readout_directions(J, unembed, s_id, layers)
                 d_tgt = readout_directions(J, unembed, t_id, layers)
-                handles = install(model, layers, d_src, d_tgt, args.mode, args.strength)
+                handles = install(model, layers, d_src, d_tgt, args.mode,
+                                  args.strength, steer_generated=args.steer_generated)
             try:
                 with torch.no_grad():
                     out = model.generate(**inputs, max_new_tokens=args.max_new_tokens,
@@ -289,11 +302,13 @@ def main() -> None:
 
     out_path = args.out or (REPO / "training" /
                             f"inject_{'base' if args.base_only else 'ft'}"
-                            f"_{args.prompt_style}.json")
+                            f"_{args.prompt_style}"
+                            f"{'_gen' if args.steer_generated else ''}.json")
     out_path.write_text(json.dumps(
         {"config": {"model": label, "rows": len(rows), "doses": args.doses,
                     "prompt_style": args.prompt_style,
                     "mode": args.mode, "strength": args.strength,
+                    "steer_generated": args.steer_generated,
                     "layer_min": LAYER_MIN, "seed": args.seed},
          "rates": {str(d): mean([t["detected"] for t in trials if t["dose"] == d])
                    for d in args.doses},
