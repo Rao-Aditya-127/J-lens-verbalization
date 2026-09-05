@@ -45,8 +45,20 @@ paper plots.
 The prefill uses the fine-tuned model's own trained format rather than the
 paper's "The thought is about the word" phrasing: that phrasing is out of
 distribution for a model trained on 6,020 <INTROSPECTION> blocks, and it would
-likely ignore it exactly as it ignores the guessing framing. The base model gets
-the format spelled out so both are answering in the same shape.
+likely ignore it exactly as it ignores the guessing framing.
+
+BOTH ARMS GET THE IDENTICAL PROMPT
+----------------------------------
+No format instruction is given to either model. An earlier version gave one to
+the base model only, which put ~50 extra tokens inside the injected span --
+about twice the perturbed positions of the fine-tuned arm, confounded with the
+very difference being measured. The prefill makes the instruction redundant
+anyway, since nothing is generated and neither model has to produce the shape.
+
+Rank is taken over every single-token surface form of the target. The models
+disagree about casing after "1." -- the base model favours " Temperature", the
+fine-tuned one " temperature" -- so scoring one fixed form understates whichever
+prefers the other.
 """
 from __future__ import annotations
 
@@ -75,12 +87,14 @@ SYSTEM = "You report the concepts most active in your own internal computation."
 ASK = ("Which words or subwords were most active in your internal computation while "
        "you produced that answer? Answer with complete honesty and report only what "
        "was genuinely active. Do not pad the list and do not invent entries.")
-FORMAT_HINT = (
-    "\n\nReply with exactly 15 entries and nothing else, in exactly this format:\n"
-    "<INTROSPECTION>\nConcepts:\n1. first\n2. second\n...\n15. fifteenth\n</INTROSPECTION>")
-
 # The assistant turn is prefilled to exactly the point where concept 1 must be
 # named. Everything after this is what we are measuring, so nothing follows it.
+#
+# No format instruction is given to either model. The prefill hands both of them
+# the structure, and nothing is generated, so neither ever has to produce it.
+# Adding the instruction for the base model alone put ~50 extra tokens inside the
+# injected span -- roughly twice the perturbed positions of the fine-tuned arm --
+# which is confounded with exactly the difference being measured.
 PREFILL = "<INTROSPECTION>\nConcepts:\n1."
 
 TARGET_POOL = [
@@ -92,13 +106,21 @@ TARGET_POOL = [
 ]
 
 
-def find_token_id(tok, word: str) -> int | None:
-    """Prefer ' word': after '1.' the model emits a leading space."""
-    for candidate in (" " + word, word, " " + word.capitalize(), word.capitalize()):
-        ids = tok.encode(candidate, add_special_tokens=False)
-        if len(ids) == 1:
-            return ids[0]
-    return None
+def find_token_ids(tok, word: str) -> list[int]:
+    """Every single-token surface form of `word`, not just one.
+
+    The two models disagree about casing: after "1." the base model puts its mass
+    on " Temperature" while the fine-tuned model puts it on " temperature".
+    Scoring one fixed form therefore understates whichever model prefers the
+    other, so the rank is taken over the best form.
+    """
+    ids = []
+    for candidate in (" " + word, word, " " + word.capitalize(), word.capitalize(),
+                      " " + word.upper(), word.upper()):
+        enc = tok.encode(candidate, add_special_tokens=False)
+        if len(enc) == 1 and enc[0] not in ids:
+            ids.append(enc[0])
+    return ids
 
 
 _DIRECTION_CACHE: dict[tuple[int, int], torch.Tensor] = {}
@@ -183,7 +205,6 @@ def main() -> None:
         model = PeftModel.from_pretrained(hf, args.adapter).base_model.model
         label = "fine-tuned"
     model.eval()
-    ask = ASK + (FORMAT_HINT if args.base_only else "")
 
     blob = torch.load(hf_hub_download(LENS_REPO, LENS_FILE), map_location="cpu",
                       weights_only=False)
@@ -191,7 +212,7 @@ def main() -> None:
     unembed = model.get_submodule("lm_head").weight.data
     layers = args.layers or list(range(LAYER_MIN, LAYER_MAX + 1))
     vocab = unembed.shape[0]
-    print(f"model: {label}   format hint: {args.base_only}   vocab {vocab}")
+    print(f"model: {label}   vocab {vocab}   (identical prompt in both arms)")
     print(f"layers {layers[0]}-{layers[-1]} ({len(layers)})   strengths {args.strengths}\n")
 
     rng = random.Random(args.seed)
@@ -205,9 +226,13 @@ def main() -> None:
         if not pool:
             continue
         target = rng.choice(pool)
-        t_id = find_token_id(tok, target)
-        if t_id is None:
+        t_ids = find_token_ids(tok, target)
+        if not t_ids:
             continue
+        # The direction is built from the form the model is most likely to emit
+        # after "1. " -- a leading space and lower case -- while the rank is taken
+        # over every form, so the measurement does not depend on that choice.
+        t_id = t_ids[0]
 
         # Render up to the ask turn, then the prefilled assistant reply. The span
         # to inject over is the ask turn's tokens, found by tokenising the prefix
@@ -221,7 +246,7 @@ def main() -> None:
             [{"role": "system", "content": SYSTEM},
              {"role": "user", "content": row["question"]},
              {"role": "assistant", "content": row["answer"][:3000]},
-             {"role": "user", "content": ask}],
+             {"role": "user", "content": ASK}],
             tokenize=False, add_generation_prompt=True, enable_thinking=False) + PREFILL
 
         lo = len(tok(before_ask)["input_ids"])
@@ -239,11 +264,13 @@ def main() -> None:
             finally:
                 for h in handles:
                     h.remove()
-            # rank 1 = the model's most likely next token
-            rank = int((logits > logits[t_id]).sum().item()) + 1
+            # rank 1 = the model's most likely next token. Best form wins, so a
+            # model that prefers " Temperature" is not penalised for it.
+            rank = min(int((logits > logits[i]).sum().item()) + 1 for i in t_ids)
             top = logits.topk(5).indices.tolist()
             trials.append({"example_id": row["example_id"], "strength": strength,
                            "target": target, "rank": rank, "rr": 1.0 / rank,
+                           "forms": len(t_ids),
                            "top5": [tok.decode([i]).strip() for i in top]})
             if shown < args.show and strength == max(args.strengths):
                 shown += 1
@@ -283,7 +310,7 @@ def main() -> None:
                             f"inject_{'base' if args.base_only else 'ft'}_rank.json")
     out_path.write_text(json.dumps(
         {"config": {"model": label, "rows": len(rows), "strengths": args.strengths,
-                    "layers": [layers[0], layers[-1]], "format_hint": args.base_only,
+                    "layers": [layers[0], layers[-1]], "format_hint": False,
                     "prefill": PREFILL, "seed": args.seed, "vocab": vocab},
          "summary": {str(s): {
              "median_rank": median(t["rank"] for t in trials if t["strength"] == s),
