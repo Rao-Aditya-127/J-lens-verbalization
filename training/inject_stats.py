@@ -80,6 +80,47 @@ def _erf(x: float) -> float:
     return sign * y
 
 
+def wilcoxon(diffs: list[float]) -> tuple[int, int, float]:
+    """Signed-rank test on paired differences. Returns (n_pos, n_used, p).
+
+    The two arms score the IDENTICAL rows with the IDENTICAL target word per row,
+    so the design is paired and an unpaired test throws that away. Ranking |d|
+    rather than d keeps it robust to ranks that span 1 to 250,000.
+    """
+    nz = [d for d in diffs if d != 0]
+    n = len(nz)
+    if n < 6:
+        return sum(d > 0 for d in nz), n, 1.0
+    order = sorted(range(n), key=lambda i: abs(nz[i]))
+    ranks = [0.0] * n
+    i = 0
+    while i < n:
+        j = i
+        while j + 1 < n and abs(nz[order[j + 1]]) == abs(nz[order[i]]):
+            j += 1
+        avg = (i + j) / 2 + 1
+        for k in range(i, j + 1):
+            ranks[order[k]] = avg
+        i = j + 1
+    w_pos = sum(r for r, d in zip(ranks, nz) if d > 0)
+    mu = n * (n + 1) / 4
+    sigma = (n * (n + 1) * (2 * n + 1) / 24) ** 0.5
+    z = abs(w_pos - mu) / sigma if sigma else 0.0
+    p = 2 * (1 - 0.5 * (1 + _erf(z / 2 ** 0.5)))
+    return sum(d > 0 for d in nz), n, max(min(p, 1.0), 0.0)
+
+
+def sign_test(n_pos: int, n: int) -> float:
+    """Exact two-sided binomial test at p=0.5 -- the most readable paired result."""
+    from math import comb
+    if n == 0:
+        return 1.0
+    total = 2 ** n
+    k = min(n_pos, n - n_pos)
+    tail = sum(comb(n, i) for i in range(k + 1)) / total
+    return min(2 * tail, 1.0)
+
+
 def boot_diff(a: list[bool], b: list[bool], reps: int = 20000,
               seed: int = 17) -> tuple[float, float, float]:
     """Difference in rate (a - b) with a percentile CI. Unpaired: different models."""
@@ -148,6 +189,25 @@ def main() -> None:
 
     print("\n  * = CI excludes zero. Where it does not, the point estimate is not")
     print("    evidence of a difference however suggestive it looks.")
+
+    # Paired, because the arms score the same rows with the same target words.
+    b_by = {t["example_id"]: t for t in b}
+    f_by = {t["example_id"]: t for t in f}
+    shared = sorted(set(b_by) & set(f_by))
+    same_target = all(b_by[i]["target"] == f_by[i]["target"] for i in shared)
+    if shared:
+        diffs = [f_by[i]["rank"] - b_by[i]["rank"] for i in shared]   # >0: base better
+        n_pos, n_used, p_w = wilcoxon(diffs)
+        p_s = sign_test(n_pos, n_used)
+        print("\n" + "-" * 78)
+        print(f"  PAIRED  ({len(shared)} rows scored by both arms; "
+              f"same target word per row: {same_target})")
+        print("-" * 78)
+        print(f"  base ranked the concept higher on {n_pos} of {n_used} rows")
+        print(f"    sign test        p = {p_s:.3g}")
+        print(f"    Wilcoxon signed-rank  p = {p_w:.3g}")
+        print("  The design is paired, so this is the test with the most power. The")
+        print("  Mann-Whitney above ignores the pairing and is therefore conservative.")
 
     print("\n" + "=" * 78)
     print("3. FULL CURVES")

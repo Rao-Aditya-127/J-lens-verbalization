@@ -215,6 +215,12 @@ def main() -> None:
     print(f"model: {label}   vocab {vocab}   (identical prompt in both arms)")
     print(f"layers {layers[0]}-{layers[-1]} ({len(layers)})   strengths {args.strengths}\n")
 
+    single_token_pool = [w for w in TARGET_POOL if find_token_ids(tok, w)]
+    print(f"targets: {len(single_token_pool)} of {len(TARGET_POOL)} pool words have a "
+          f"single-token form; only those are drawn")
+    if not single_token_pool:
+        raise SystemExit("no pool word is a single token for this tokenizer")
+
     rng = random.Random(args.seed)
     trials, shown = [], 0
 
@@ -222,13 +228,14 @@ def main() -> None:
         text = (row["question"] + " " + row["answer"]).lower()
         stored = {c["concept"].strip().lower()
                   for k in ("j_lens_top10", "j_lens_top10_novel") for c in row[k]}
-        pool = [w for w in TARGET_POOL if w not in text and w not in stored]
+        # Draw only from words that HAVE a single-token form. Choosing first and
+        # checking afterwards silently discarded the whole row whenever the draw
+        # happened to be multi-token, which cost 37 of 100 rows in an earlier run.
+        pool = [w for w in single_token_pool if w not in text and w not in stored]
         if not pool:
             continue
         target = rng.choice(pool)
         t_ids = find_token_ids(tok, target)
-        if not t_ids:
-            continue
         # The direction is built from the form the model is most likely to emit
         # after "1. " -- a leading space and lower case -- while the rank is taken
         # over every form, so the measurement does not depend on that choice.
