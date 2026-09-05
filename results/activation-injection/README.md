@@ -1,6 +1,6 @@
 # Activation injection: does the model notice a concept placed in its workspace?
 
-*Qwen3.6-27B, base vs the QLoRA fine-tune. n = 63 held-out questions.*
+*Qwen3.6-27B, base vs the QLoRA fine-tune. n = 100 held-out questions.*
 
 ---
 
@@ -49,7 +49,7 @@ J-space, it should notice an injected concept *more* readily than the base model
 | Adapter | `RaoAditya/j-lens-verbalization-qlora` (r=32, 2 epochs, 6,020 examples) |
 | Lens | `neuronpedia/jacobian-lens` → `Qwen3.6-27B_jacobian_lens_n1000.pt` |
 | Layers | 24–58 (35 layers), the workspace band from Gurnee et al. (2026) |
-| Questions | 63 held-out test rows from `dataset/jlens/collected_answers.jsonl` |
+| Questions | 100 held-out test rows from `dataset/jlens/collected_answers.jsonl` |
 | Vocabulary | 248,320 tokens |
 | Seed | 17 |
 
@@ -185,67 +185,86 @@ is the comparison about the adapter.
 
 | model | best strength | median rank | control (no injection) | P(better) | p |
 |---|---|---|---|---|---|
-| base | 0.05 | **66** | 26,596 | 0.989 | ~0 |
-| fine-tuned | 0.10 | **346** | 25,909 | 0.926 | ~0 |
+| base | 0.05 | **93** | 25,942 | 1.000 | ~0 |
+| fine-tuned | 0.30 | **672** | 19,896 | 0.908 | ~0 |
 
 `P(better)` is the probability that a random injected trial ranks the concept
-above a random control trial; 0.5 is chance. Both are near ceiling.
+above a random control trial; 0.5 is chance. The base model's is **1.000** —
+every injected trial beat every control trial.
 
 **This is the strongest causal result in the project.** The prompt is identical
 between injected and control, so nothing about text prediction explains a
-400-fold and 75-fold improvement in rank. Thirteen prompted designs, a 17×
-training gain, and a k-NN baseline all failed to establish this; one intervention
+280-fold and 30-fold improvement in rank. Thirteen prompted designs, a 17×
+training gain and a k-NN baseline all failed to establish this; one intervention
 does.
 
-### The fine-tuned model is *less* sensitive, not more
+### Training did not simply reduce sensitivity — it changed its shape
 
 Each model at its own best strength, chosen by the same rule (lowest median
-rank):
+rank). **Two of these differences are significant in opposite directions:**
 
-| measure | base @ 0.05 | fine-tuned @ 0.10 | difference | 95% CI |
+| measure | base @ 0.05 | fine-tuned @ 0.30 | difference | 95% CI |
 |---|---|---|---|---|
-| median rank | **66** | 346 | P(base higher) = 0.771 | p = 1.6e-07 ✱ |
-| top-10 | 8% (5/63) | 5% (3/63) | +0.032 | [−0.048, +0.111] |
-| top-100 | **59% (37/63)** | 16% (10/63) | +0.429 | [+0.270, +0.571] ✱ |
-| top-1000 | **92% (58/63)** | 59% (37/63) | +0.333 | [+0.190, +0.476] ✱ |
+| median rank | **93** | 672 | P(base higher) = 0.686 | p = 5.7e-06 ✱ |
+| top-10 | 2% (2/100) | **9% (9/100)** | −0.070 | [−0.130, −0.010] ✱ |
+| top-100 | **52%** | 32% | +0.200 | [+0.060, +0.330] ✱ |
+| top-1000 | **91%** | 54% | +0.370 | [+0.260, +0.480] ✱ |
 
 ✱ = interval excludes zero.
 
-Three of four measures favour the base model. The fourth is **5 successes
-against 3** — far too rare for this sample to resolve in either direction, and
-**not claimed**. Raw counts are given because at n = 63 a percentage implies
-precision the data does not have.
+The fine-tuned model reaches the **very top** more often. The base model reaches
+**moderate ranks** far more often. Both differences clear zero, so this is a
+dissociation rather than one model simply being better.
 
-### The paired test, which is the one to quote
+### The paired test
 
-Both arms scored the **identical 63 rows with the identical target word per
-row**, so the design is paired and the row-to-row variation cancels:
+Both arms scored the **identical 100 rows with the identical target word per
+row**, so the design is paired and row-to-row variation cancels:
 
-> **The base model ranked the injected concept higher on 51 of 63 rows.**
-> Sign test p = 7.5e-07 · Wilcoxon signed-rank p = 3.3e-06
+> **The base model ranked the injected concept higher on 63 of 100 rows.**
+> Sign test p = 0.012 · Wilcoxon signed-rank p = 5.2e-07
 
-That is the same conclusion as the Mann-Whitney above, with more power and in a
-form a reader can check by eye. The unpaired test is reported alongside because
-it makes no assumption about the pairing holding, and it agrees.
+The Wilcoxon is far more significant than the sign test because it weights *how
+much* higher, not merely how often — which is the dissociation again: the base
+model wins by a lot on most rows, the fine-tuned model wins by a little on some.
 
-> **Stated against ourselves:** the fine-tuned model's top-10 peaks at 13% at
-> strength 0.2, above the base model's 8%. Selecting that strength would show a
-> fine-tuned advantage on that one metric. Its median rank there is 541 against
-> 66, and choosing a dose per metric is exactly what shouldn't be done — so the
-> table uses each model's own median-rank optimum, by the same rule for both.
+### The distributions cross, and that is the actual finding
+
+Medians hide it. The full rank distributions at each model's best strength:
+
+| quantile | base @ 0.05 | fine-tuned @ 0.30 |
+|---|---|---|
+| 5th | 14 | **5** |
+| 10th | 16 | **11** |
+| 25th | 37 | 43 |
+| 50th | **89** | 638 |
+| 75th | **209** | 3,935 |
+| 95th | **1,447** | 13,805 |
+| | | |
+| reached top-10 | 2 | **9** |
+| still above rank 5,000 | **1** | 24 |
+
+**The curves cross at about rank 34.** Below it the fine-tuned model is ahead;
+above it the base model is, by a widening margin.
+
+- **The fine-tuned model is all-or-nothing.** When the injection lands it lands
+  hard — 9 top-10 hits against 2. When it doesn't, it fails outright: **24 trials
+  still above rank 5,000, against the base model's 1.**
+- **The base model is graded.** Almost every trial moves substantially, none
+  catastrophically fails.
 
 ### Full curves
 
 | strength | base: median rank | top-100 | | strength | fine-tuned: median rank | top-100 |
 |---|---|---|---|---|---|---|
-| 0 | 26,596 | 0% | | 0 | 25,909 | 0% |
-| 0.02 | 499 | 13% | | 0.05 | 2,680 | 2% |
-| 0.03 | 132 | 43% | | 0.10 | **346** | 16% |
-| **0.05** | **66** | **59%** | | 0.15 | 587 | 22% |
-| 0.07 | 239 | 30% | | 0.20 | 541 | 32% |
-| 0.10 | 5,678 | 5% | | 0.30 | 660 | 29% |
+| 0 | 25,942 | 0% | | 0 | 19,896 | 0% |
+| 0.02 | 480 | 19% | | 0.05 | 3,068 | 4% |
+| 0.03 | 151 | 40% | | 0.10 | 728 | 24% |
+| **0.05** | **93** | **52%** | | 0.15 | 1,492 | 22% |
+| 0.07 | 393 | 25% | | 0.20 | 995 | 31% |
+| 0.10 | 7,940 | 2% | | **0.30** | **672** | **32%** |
 
-**The shapes differ, and that is the finding.** The base model has a sharp
+**The shapes differ too.** The base model has a sharp
 window: highly sensitive at 0.05, then it breaks — at 0.1 its top-5 is
 `['', '**', '<|im_end|>']`, a degenerate distribution. The fine-tuned model rises
 later, plateaus from 0.1 to 0.3, and **never breaks** — at strength 0.3 it is
@@ -257,17 +276,26 @@ correctly formatted.
 ## 6. What it means
 
 **Training to verbalize the J-space did not improve the model's sensitivity to
-its own workspace content. It reduced it.**
+its own workspace content, and it did not simply reduce it either. It made it
+all-or-nothing.**
 
-The mechanism is visible in the training log itself: entropy over the concept
-tokens fell from **1.197 → 0.436** during fine-tuning. SFT made the model's
-next-concept distribution far sharper and more topical — and a confident
-distribution is harder for an internal perturbation to move. The robustness seen
-above is the same fact from the other side: the fine-tuned model keeps producing
-fluent, plausible, well-formatted concept lists no matter what is done to its
-residual stream.
+The mechanism is visible in the training log: entropy over the concept tokens
+fell from **1.197 → 0.436** during fine-tuning. SFT made the model's
+next-concept distribution far sharper and more topical, and a peaked
+distribution behaves exactly this way under perturbation — it resists being
+moved at all, and once the injection overcomes the peak the concept arrives near
+the top. A flatter distribution moves gradually instead, which is the base
+model's graded response.
 
-**Training bought fluency and cost sensitivity.**
+The same fact appears qualitatively: at strength 0.3 the fine-tuned model is
+still emitting `['temperature', 'temperatures', 'weather', '温度']` — fluent,
+plausible, correctly formatted — while the base model has already degenerated to
+`['', '**', '<|im_end|>']` by 0.1.
+
+**Training bought fluency and confidence, and paid for them in reliable
+sensitivity to its own state.** On any given question the fine-tuned model is
+more likely to miss an injected concept entirely (24% of trials still above rank
+5,000, against 1%) and more likely to name it outright when it does notice.
 
 That completes a consistent picture across the project:
 
@@ -278,20 +306,26 @@ That completes a consistent picture across the project:
 | training does not create it | 17× better prediction, framing effect −0.001 [−0.006, +0.004] |
 | most of that gain was never introspective | text-only k-NN reaches 0.427 of 0.579 |
 | the J-space itself did not move | 0.829 vs a 0.845 noise floor |
-| **and training costs the access that was there** | this experiment |
+| **and training makes the surviving access erratic** | this experiment |
 
 ---
 
 ## 7. Limitations
 
-**n = 63, not the 100 requested — fixed in the code, but after these runs.** A
-row was skipped when its randomly-chosen target word turned out not to be a
-single token, and the code dropped the row rather than drawing again; 37 of 100
-were lost that way. `inject.py` now filters the pool to single-token words
-*before* sampling, so a rerun would recover them. The loss was random with
-respect to row content, so it cost power rather than introducing bias — but
-these particular numbers come from n = 63 and a rerun would tighten every
-interval here.
+**Only 21 of the 34 pool words survive tokenization**, so the same handful of
+targets recur across rows — `compost`, `canyon`, `glacier` and the rest. The
+rank of a concept depends on the concept, so results are averaged over fewer
+distinct words than the pool size suggests. A first version of this experiment
+was worse still: it drew a target *before* checking, and silently discarded the
+whole row whenever the draw was multi-token, which cost 37 of 100 rows. That is
+fixed — the pool is filtered before sampling — but widening the pool with more
+single-token nouns would be a real improvement.
+
+**Top-10 rates are unstable at this sample size.** Between the n = 63 run and
+this one, the base model's top-10 moved from 8% (5/63) to 2% (2/100) on an
+otherwise identical experiment. The stable measures barely shifted — median rank
+66 → 93, top-100 59% → 52%. Any claim resting on a handful of successes should
+be treated as provisional even when its interval excludes zero.
 
 **This is `steer`, not Neuronpedia's `swapToken`.** `swap` has no strength
 parameter — its magnitude is whatever `h · ŝ` happens to be, measured at 0.2%,

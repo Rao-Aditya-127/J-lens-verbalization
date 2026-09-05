@@ -6,7 +6,7 @@ numbers mean and where they fall short — plus that experiment's own figures.
 
 | experiment | question | headline |
 |---|---|---|
-| [activation-injection](activation-injection/) | Does the model notice a concept injected into its workspace, and does fine-tuning help? | Both models' reports causally track their activations (rank 26,596 → 66 and 25,909 → 346, p ≈ 0). Fine-tuning **reduced** that sensitivity: the base model ranked the injected concept higher on **51 of 63** rows, sign test p = 7.5e-07. |
+| [activation-injection](activation-injection/) | Does the model notice a concept injected into its workspace, and does fine-tuning help? | Both models' reports causally track their activations (median rank 25,942 → 93 and 19,896 → 672, p ≈ 0). Fine-tuning made that sensitivity **all-or-nothing**: it reaches the top-10 more often (9% vs 2%) yet fails outright far more often (24% of trials still above rank 5,000, vs 1%). The base model ranks the concept higher on **63 of 100** rows, Wilcoxon p = 5.2e-07. |
 
 ## Conventions
 
