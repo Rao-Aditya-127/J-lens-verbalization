@@ -8,7 +8,7 @@ different purposes and were getting hard to tell apart in one flat folder.
 | [`sft/`](sft/) | build the dataset, fine-tune, evaluate | yes |
 | [`lens/`](lens/) | run the Jacobian Lens locally, on the base model or the adapter | yes |
 | [`injection/`](injection/) | the activation-injection experiment and its analysis | the experiment does; the stats and figure do not |
-| [`analysis/`](analysis/) | offline analysis of results already collected | **no** |
+| [`analysis/`](analysis/) | analysis of results already collected | **no**, except `probe_thinking.py` |
 
 Write-ups of what these produced live in [`results/`](../results/).
 Setup for a fresh GPU box is in [RUNPOD.md](RUNPOD.md).
@@ -116,10 +116,19 @@ a result.
 
 ---
 
-## `analysis/` — no GPU required
+## `analysis/` — mostly no GPU required
 
-Everything here reads JSON that a GPU run already produced.
+Everything here reads JSON that a GPU run already produced, with one exception:
+`probe_thinking.py` generates, so it needs the model.
 
+- `probe_thinking.py` — **needs a GPU.** What did fine-tuning cost outside the
+  trained task? Puts an ordinary question to the model with the `<think>` prefix
+  off and on. Answer: with it off, the fine-tuned model returns its trained
+  concept list on 30 of 30 held-out rows and answers none of them. Write-up:
+  [`results/capability-regression/`](../results/capability-regression/).
+- `plot_regression.py` — the figure for that, with the counts re-derived from the
+  per-row table rather than copied, so the figure and the write-up cannot drift
+  apart.
 - `compare_eval.py` — before/after with bootstrap CIs, separating accuracy from
   generation failure. An empty generation scores 0 alongside a genuinely wrong
   answer, and a mean cannot tell them apart.

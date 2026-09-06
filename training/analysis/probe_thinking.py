@@ -61,6 +61,11 @@ THINK_CLOSE = re.compile(r"</think>", re.I)
 # the model emitted its learned behaviour instead of reasoning.
 TRAINED = re.compile(r"<INTROSPECTION>|</INTROSPECTION>|^\s*Concepts:", re.I | re.M)
 CONCEPT_LINE = re.compile(r"^\s*(?:\d+[.)]|[-*•])\s*\S", re.M)
+# Below this, the block is a formality rather than reasoning. On 30 held-out
+# questions the fine-tuned model produced two clearly separated populations:
+# 13 blocks of 16-21 chars, all of the shape "Here's a", and 17 of 155-1,171.
+# Nothing landed in between, so the cut is not doing any real work at 25.
+STUB_CHARS = 25
 
 
 def classify(gen: str, thinking: bool, n_tok: int, budget: int) -> tuple[str, int]:
@@ -70,13 +75,22 @@ def classify(gen: str, thinking: bool, n_tok: int, budget: int) -> tuple[str, in
     never opens one: the fine-tuned model writes its concept list straight into
     the reasoning slot, and that was reported as 199 chars of "reasoning" on the
     first run. The trained markers distinguish the two.
+
+    It is wrong a second way when the model opens and closes the block having
+    written almost nothing. A closed `</think>` looks like intact reasoning to
+    any tag-matching rule, and 13 of 30 rows scored that way on a block too
+    short to hold a thought. Length separates them.
     """
     close = THINK_CLOSE.search(gen)
     trained = bool(TRAINED.search(gen))
     if not thinking:
         return ("trained list" if trained else "answered directly"), 0
     if close:
-        return "reasoned, then answered", close.start()
+        n = close.start()
+        if n < STUB_CHARS:
+            return ("STUB, then the trained list" if TRAINED.search(gen[n:])
+                    else "STUB, then answered"), n
+        return "reasoned, then answered", n
     if trained:
         return "TRAINED LIST IN THE REASONING SLOT", 0
     if n_tok >= budget:
@@ -172,6 +186,8 @@ def main() -> None:
     print("    only fires on prompts that look like training. Prompt-specific.")
     print("  * 'TRAINED LIST IN THE REASONING SLOT' -> two epochs of narrow SFT cost")
     print("    the model its reasoning on ordinary questions. A real regression.")
+    print("  * 'STUB, then the trained list' -> the block opens and closes on a few")
+    print("    words. Reasoning is not intact; only the tags are.")
 
 
 if __name__ == "__main__":

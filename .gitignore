@@ -35,3 +35,9 @@ training/train.log
 inject_*.json
 training/inject_*.json
 training/jlens_shift.json
+
+# Probe run logs. The tallies that matter are transcribed into
+# training/analysis/plot_regression.py; the raw stdout is an artefact.
+base30.txt
+probe_*.txt
+*.log
