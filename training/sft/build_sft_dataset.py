@@ -30,7 +30,9 @@ from pathlib import Path
 
 from transformers import AutoTokenizer
 
-REPO = Path(__file__).resolve().parents[1]
+# parents[2]: this file sits at training/<group>/, so the repo root is two
+# levels up. Every data and output path below is relative to it.
+REPO = Path(__file__).resolve().parents[2]
 SOURCE = REPO / "dataset" / "jlens" / "collected_answers.jsonl"
 OUT_DIR = REPO / "training" / "data"
 MODEL_ID = "Qwen/Qwen3.6-27B"

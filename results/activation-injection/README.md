@@ -16,7 +16,7 @@ the target cannot separate those, because the target is mostly a function of the
 input. We measured how much: a bag-of-words nearest-neighbour predictor with no
 access to any activation reaches **0.427** on list B — concepts that appear
 *nowhere* in the question or answer — against the fine-tuned model's 0.579
-(`training/text_only_baseline.py`).
+(`training/analysis/text_only_baseline.py`).
 
 The other control we had — telling the model it has **no** introspective access
 and seeing whether its answer changes — turned out to be inert after
@@ -53,9 +53,9 @@ J-space, it should notice an injected concept *more* readily than the base model
 | Vocabulary | 248,320 tokens |
 | Seed | 17 |
 
-**Code:** `training/inject.py` (experiment) · `training/inject_sanity.py`
-(verifies the intervention lands) · `training/inject_stats.py` (tests) ·
-`training/plot_inject.py` (figure) · `training/jlens_calibrate.py` (established
+**Code:** `training/injection/inject.py` (experiment) · `training/injection/inject_sanity.py`
+(verifies the intervention lands) · `training/injection/inject_stats.py` (tests) ·
+`training/injection/plot_inject.py` (figure) · `training/lens/jlens_calibrate.py` (established
 the lens transport orientation).
 
 ### The intervention
@@ -348,14 +348,14 @@ informative.
 ## 8. Reproducing
 
 ```bash
-python training/inject_sanity.py --rows 3           # the intervention lands
-python training/inject.py --base-only --rows 100 \
+python training/injection/inject_sanity.py --rows 3           # the intervention lands
+python training/injection/inject.py --base-only --rows 100 \
     --strengths 0 0.02 0.03 0.05 0.07 0.10 --out inject_base_clean.json
-python training/inject.py --adapter RaoAditya/j-lens-verbalization-qlora --rows 100 \
+python training/injection/inject.py --adapter RaoAditya/j-lens-verbalization-qlora --rows 100 \
     --strengths 0 0.05 0.10 0.15 0.20 0.30 --out inject_ft_clean.json
 
-python training/inject_stats.py                     # tests, offline
-python training/plot_inject.py                      # figure, offline
+python training/injection/inject_stats.py                     # tests, offline
+python training/injection/plot_inject.py                      # figure, offline
 ```
 
 ~15 minutes per arm on one L40S (378 forward passes, no generation). The analysis

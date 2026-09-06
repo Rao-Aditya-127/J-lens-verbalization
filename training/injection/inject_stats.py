@@ -29,7 +29,9 @@ import random
 from pathlib import Path
 from statistics import median
 
-REPO = Path(__file__).resolve().parents[1]
+# parents[2]: this file sits at training/<group>/, so the repo root is two
+# levels up. Every data and output path below is relative to it.
+REPO = Path(__file__).resolve().parents[2]
 
 
 def load(path: Path) -> dict:

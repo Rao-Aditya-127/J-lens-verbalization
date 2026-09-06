@@ -159,7 +159,7 @@ No HF token needed — the dataset and the model are both public.
 ## 7. Build the training examples
 
 ```bash
-python training/build_sft_dataset.py
+python training/sft/build_sft_dataset.py
 ```
 
 Expect:
@@ -189,9 +189,9 @@ echo 'export WANDB_API_KEY=<your key>' >> ~/.bashrc
 ## 9. Baseline: score the UNTRAINED model first
 
 ```bash
-python training/check_template.py     # CPU only, seconds -- run once
+python training/sft/check_template.py     # CPU only, seconds -- run once
 
-python training/eval_sft.py --base-only --adapter none --limit 150     --format-hint --no-thinking --max-new-tokens 256
+python training/sft/eval_sft.py --base-only --adapter none --limit 150     --format-hint --no-thinking --max-new-tokens 256
 ```
 
 **`--no-thinking` is mandatory on every eval run.** Qwen3.6 reasons by default;
@@ -232,7 +232,7 @@ full 486 costs 4x more for a marginal gain in precision.
 ## 10. Smoke test — do not skip
 
 ```bash
-python training/train_sft.py --smoke
+python training/sft/train_sft.py --smoke
 ```
 
 ~10 minutes. It prints a block like:
@@ -268,7 +268,7 @@ Concepts:
 ## 11. Full run
 
 ```bash
-nohup python training/train_sft.py > /workspace/train.log 2>&1 &
+nohup python training/sft/train_sft.py > /workspace/train.log 2>&1 &
 
 tail -f /workspace/train.log        # ctrl-C stops watching, not training
 ```
@@ -283,8 +283,8 @@ Expect **2-4 hours**. Watch that loss starts around 2-4 and falls.
 ## 12. Evaluate
 
 ```bash
-python training/eval_sft.py --adapter training/runs/qlora-v1/final --limit 150     --format-hint --no-thinking --max-new-tokens 256     --out training/eval_after.json
-python training/plot_training.py training/runs/qlora-v1/final/log_history.json
+python training/sft/eval_sft.py --adapter training/runs/qlora-v1/final --limit 150     --format-hint --no-thinking --max-new-tokens 256     --out training/eval_after.json
+python training/sft/plot_training.py training/runs/qlora-v1/final/log_history.json
 ```
 
 **Every flag must match step 9** — same `--limit` (or you compare different
@@ -328,10 +328,10 @@ Then in RunPod: **Connect → HTTP/Jupyter**, or use `runpodctl send`, or
 logits tensor is ~2 GB at batch 4 and doubles in the backward pass. In order:
 
 ```bash
-python training/train_sft.py --batch-size 2 --grad-accum 8   # same effective batch
+python training/sft/train_sft.py --batch-size 2 --grad-accum 8   # same effective batch
 
 pip install liger-kernel                                     # then, if still OOM
-python training/train_sft.py --liger
+python training/sft/train_sft.py --liger
 ```
 
 `--liger` is off by default because liger-kernel has to support this exact

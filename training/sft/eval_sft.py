@@ -35,7 +35,9 @@ import torch
 from peft import PeftModel
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
-REPO = Path(__file__).resolve().parents[1]
+# parents[2]: this file sits at training/<group>/, so the repo root is two
+# levels up. Every data and output path below is relative to it.
+REPO = Path(__file__).resolve().parents[2]
 MODEL_ID = "Qwen/Qwen3.6-27B"
 
 SYSTEM_INTRO = "You report the concepts most active in your own internal computation."

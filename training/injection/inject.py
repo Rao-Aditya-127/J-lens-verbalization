@@ -77,8 +77,10 @@ for stream in (sys.stdout, sys.stderr):
     except (AttributeError, ValueError):
         pass
 
-REPO = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO / "training"))
+# parents[2]: this file sits at training/<group>/, so the repo root is two
+# levels up. Every data and output path below is relative to it.
+REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO / "training" / "lens"))
 from jlens_calibrate import COLLECTED, LENS_FILE, LENS_REPO, MODEL_ID  # noqa: E402
 
 LAYER_MIN, LAYER_MAX = 24, 58

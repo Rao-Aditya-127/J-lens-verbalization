@@ -1,81 +1,150 @@
 # training
 
-QLoRA SFT: teach Qwen3.6-27B to report the J-lens concepts active while it answers.
+Everything that runs a model. Four groups, because these scripts serve very
+different purposes and were getting hard to tell apart in one flat folder.
 
-Data comes from `dataset/jlens/collected_answers.jsonl` (3,800 rows), also
-published at <https://huggingface.co/datasets/RaoAditya/j-lens-verbalization>.
+| folder | what it does | needs a GPU |
+|---|---|---|
+| [`sft/`](sft/) | build the dataset, fine-tune, evaluate | yes |
+| [`lens/`](lens/) | run the Jacobian Lens locally, on the base model or the adapter | yes |
+| [`injection/`](injection/) | the activation-injection experiment and its analysis | the experiment does; the stats and figure do not |
+| [`analysis/`](analysis/) | offline analysis of results already collected | **no** |
 
-## Two targets, one model
+Write-ups of what these produced live in [`results/`](../results/).
+Setup for a fresh GPU box is in [RUNPOD.md](RUNPOD.md).
+
+---
+
+## `sft/` — the fine-tune
+
+Teach Qwen3.6-27B to report the J-lens concepts active while it answers. Data is
+`dataset/jlens/collected_answers.jsonl` (3,800 rows), also published at
+<https://huggingface.co/datasets/RaoAditya/j-lens-verbalization>.
+
+### Two targets, one model
 
 Every collected row becomes **two** training examples, and the instruction says
 which is being asked for:
 
 | mode | asked for | target | note |
 |---|---|---|---|
-| A | "most active concepts" | `j_lens_top10` | ~58% of it is words already in the text |
+| A | "most active concepts" | `j_lens_top10` | ~55% of it is words already in the text |
 | B | "concepts appearing nowhere in the text" | `j_lens_top10_novel` | no copying shortcut exists |
 
 The mode **must** be in the prompt. Without it the same input carries two
 different correct answers and the model learns to average them.
 
-## Run order
+### Run order
 
 ```bash
-python training/build_sft_dataset.py           # 6,020 train / 608 val / 972 test
-python training/train_sft.py --smoke           # ~10 min, catches masking bugs
-python training/train_sft.py                   # ~2-6 h on one 48GB card
-python training/eval_sft.py --adapter training/runs/qlora-v1/final
+python training/sft/build_sft_dataset.py           # 6,020 train / 608 val / 972 test
+python training/sft/train_sft.py --smoke           # ~10 min, catches masking bugs
+python training/sft/train_sft.py --epochs 2        # ~4.7 h on one 48GB card
+python training/sft/eval_sft.py --adapter training/runs/qlora-v1/final_fixed \
+    --limit 150 --no-thinking --max-new-tokens 256
 ```
 
-Run the smoke test. It prints the fully-rendered example with its label mask
-applied, which is the only reliable way to catch a chat-template or masking bug —
-those waste an entire run and are invisible in the loss curve.
+**Run the smoke test.** It prints one fully-rendered example with its label mask
+applied. A masking bug wastes an entire run and is invisible in the loss curve —
+in fact it produces a *better*-looking curve, because copying the question back
+is easier than reporting concepts. That happened here: the first run trained on
+100% of every sequence.
 
-## Setup (RunPod / any single GPU)
+### The three scripts that exist because something went wrong
 
-```bash
-pip install "transformers>=4.46" "trl>=0.12" peft bitsandbytes accelerate datasets
-# strongly recommended: fused cross-entropy, see the vocab note below
-pip install liger-kernel
-```
+- `check_template.py` — Qwen3.6 reasons by default. Without `enable_thinking=False`
+  the prompt ends at `<think>` and the model spends its whole budget reasoning
+  without answering. This prints how the template renders for training vs eval.
+- `check_adapter.py` — PEFT matches adapter weights **by module name**. Load a
+  different class than training saved against and it loads zero weights behind a
+  warning, and generation silently returns base-model output. This counts
+  non-zero `lora_B` in the *live* model and refuses to pass if enabling the
+  adapter changes nothing.
+- `fix_adapter_keys.py` — the rename that fixes exactly that. TRL saved keys
+  under `model.language_model.layers`; `Qwen3_5ForCausalLM` wants `model.layers`.
 
-Use a **persistent volume** — the checkpoint is 55.6 GB and re-downloading it
-each session is billed time.
-
-## Sizing
-
-Measured on the actual dataset:
+### Sizing
 
 ```
 sequence length   median 432 tokens, p99 648, max 763   -> max_seq_len 1024 is safe
-loss-bearing      target is ~14% of each sequence
-tokens/epoch      ~2.6M      3 epochs ~7.8M
-memory            ~31 GB at batch 4  -> fits 48GB; 80GB gives headroom
+loss-bearing      target is ~16% of each sequence
+memory            ~31 GB at batch 4  -> fits 48GB
+throughput        0.71 samples/s     -> 2 epochs ~4.7 h
 ```
 
 **The vocabulary is the memory risk, not the model.** 248,320 tokens × 5,120
-hidden = 1.27B parameters in the embedding alone, and the logits tensor is
-~2 GB at batch 4 (doubling in backward). If you OOM, that is why. A fused
-cross-entropy (Liger, Unsloth) avoids materialising it and is the difference
-between comfortable and tight on a 48 GB card.
+hidden = 1.27B parameters in the embedding alone, and the logits tensor is ~2 GB
+at batch 4, doubling in backward. If you OOM, that is why — `--liger` avoids
+materialising it, and `--batch-size 2 --grad-accum 8` is the simpler fallback.
 
-Qwen3.6-27B is multimodal; loading the CausalLM class reads only `text_config`,
-so the ~0.5B vision tower is never materialised.
+---
+
+## `lens/` — running the Jacobian Lens locally
+
+Neuronpedia hosts the base model, not the adapter, so anything about the
+fine-tuned model's *internals* has to run locally. These do that.
+
+- `probe_interp_engine.py` — can interp-engine run the lens on a PEFT model?
+  (Yes: hand `EagerModel` the inner module, `peft_model.base_model.model`, which
+  carries the LoRA layers in place while keeping the original module paths.)
+- `jlens_calibrate.py` — **run this first.** The checkpoint does not record
+  whether the transport is `resid @ J` or `resid @ J.T`, so it sweeps both
+  against readouts collected through the API: `J.T` reproduces them at 0.837
+  overlap@15, `J` gives 0.000.
+- `jlens_shift.py` — did fine-tuning move the J-space the eval scores against?
+  (0.829 against a 0.845 noise floor: no.)
+
+---
+
+## `injection/` — the causal experiment
+
+Change what is inside the model, leave the prompt byte-identical, and see whether
+the report follows. The only experiment here that a text-only predictor cannot
+explain. Full write-up: [`results/activation-injection/`](../results/activation-injection/).
+
+```bash
+python training/injection/inject_sanity.py --rows 3        # does the injection land?
+python training/injection/inject.py --base-only --rows 100
+python training/injection/inject.py --adapter RaoAditya/j-lens-verbalization-qlora --rows 100
+python training/injection/inject_stats.py                  # offline
+python training/injection/plot_inject.py                   # offline
+```
+
+Run `inject_sanity.py` first. A flat dose-response is ambiguous between "the
+model can't report it" and "the intervention did nothing", and only the first is
+a result.
+
+---
+
+## `analysis/` — no GPU required
+
+Everything here reads JSON that a GPU run already produced.
+
+- `compare_eval.py` — before/after with bootstrap CIs, separating accuracy from
+  generation failure. An empty generation scores 0 alongside a genuinely wrong
+  answer, and a mean cannot tell them apart.
+- `show_examples.py` — the model's predictions beside the lens readout, hits
+  marked, drawn with a fixed seed so nothing is cherry-picked.
+- `text_only_baseline.py` — how much of the target is reachable from the text
+  alone, by a bag-of-words nearest-neighbour predictor that never sees an
+  activation. Reaches 0.427 of the fine-tuned model's 0.579.
+- `ask.py` — interactive: ask your own question and watch the model report on
+  itself under both framings.
+
+---
 
 ## Reading the eval
 
 `eval_sft.py` scores both lists under **two framings** — introspective (what was
 trained) and guessing ("you have NO introspective access").
 
-Prompting baselines for the untrained model:
+If the fine-tuned model scores the same under both, it learned to **predict**
+J-lens output from text rather than to read its own state. That is a real
+finding, and a different one from introspection.
 
-```
-list A    ICL 0.247 | zero-shot 0.192 | guessing control 0.170
-list B    ~0.06 when asked for it directly
-```
-
-If the fine-tuned model scores the same under both framings, it learned to
-**predict** J-lens output from text rather than to read its own state. That is a
-real finding, and a different one from introspection — the headline number alone
-cannot tell them apart, which is why the control ships with the eval rather than
-being optional.
+One caveat found the hard way: after fine-tuning that control is close to inert.
+The two framings agree with each other at **0.945**, against 0.394 for the base
+model — six thousand training examples all used the introspective framing, so
+the model learned one behaviour and runs it whatever the prompt claims. A null
+under a manipulation that changes 5% of the output constrains very little, which
+is why the injection experiment exists.

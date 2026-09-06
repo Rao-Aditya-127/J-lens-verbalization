@@ -33,7 +33,9 @@ for stream in (sys.stdout, sys.stderr):
     except (AttributeError, ValueError):  # pragma: no cover - older/odd streams
         pass
 
-REPO = Path(__file__).resolve().parents[1]
+# parents[2]: this file sits at training/<group>/, so the repo root is two
+# levels up. Every data and output path below is relative to it.
+REPO = Path(__file__).resolve().parents[2]
 COLLECTED = REPO / "dataset" / "jlens" / "collected_answers.jsonl"
 WIDTH = 96
 

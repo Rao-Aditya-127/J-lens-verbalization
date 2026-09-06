@@ -34,7 +34,9 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-REPO = Path(__file__).resolve().parents[1]
+# parents[2]: this file sits at training/<group>/, so the repo root is two
+# levels up. Every data and output path below is relative to it.
+REPO = Path(__file__).resolve().parents[2]
 
 BASE_C, FT_C = "#2a78d6", "#eb6834"      # validated categorical slots 1 and 2
 INK, INK_2, GRID = "#0b0b0b", "#52514e", "#d9d8d3"
