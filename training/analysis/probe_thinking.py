@@ -1,27 +1,33 @@
 # -*- coding: utf-8 -*-
-"""Can the fine-tuned model still think? Look before designing an experiment.
+"""Did fine-tuning remove the model's reasoning, or only override it?
 
-    python training/analysis/probe_thinking.py --rows 5
-    python training/analysis/probe_thinking.py --rows 5 --base-only
+    python training/analysis/probe_thinking.py --rows 3 --base-only
+    python training/analysis/probe_thinking.py --rows 3
 
-Qwen3.6 reasons by default. The two prefixes differ in where the model starts:
+Qwen3.6 reasons by default. The two prefixes differ in where generation starts:
 
-    thinking OFF   ...<|im_start|>assistant\\n<think>\\n\\n</think>\\n\\n
-    thinking ON    ...<|im_start|>assistant\\n<think>\\n
+    thinking OFF   ...<|im_start|>assistant  <think></think>       <- empty block
+    thinking ON    ...<|im_start|>assistant  <think>               <- model reasons
 
-Every one of the fine-tune's 6,020 training examples used the OFF prefix -- an
-EMPTY think block, then straight into <INTROSPECTION>. Turning thinking on puts
-it somewhere it has never been, and three things could happen:
+All 6,020 fine-tuning examples used the OFF prefix -- an empty block, then
+straight into <INTROSPECTION>. Turning thinking on puts the model somewhere it
+has never been.
 
-  1. it reasons, then emits the concept list        -> there is an experiment here
-  2. it writes </think> immediately and jumps to the list, having learned that
-     thinking is empty                              -> there is no CoT to study
-  3. something degenerate                           -> ditto
+The first run of this probe answered the introspection question only, and the
+result was clear: the base model reasons for 4,500-7,100 characters, closes
+</think>, then answers; the fine-tuned model produces its trained 15-concept
+list either way, writing it into the reasoning slot and closing with
+</INTROSPECTION> rather than </think>. It does not reason at all.
 
-Which one it is decides whether the scored comparison (does reasoning help
-introspective accuracy, and does training change that?) is worth two hours of
-GPU. This prints the raw generations and the token counts that run would need.
-Nothing is scored here -- it is a look, not a measurement.
+That leaves the question this version asks. Two tasks are run:
+
+  introspect  the self-report prompt, which the model was trained on
+  answer      an ORDINARY question, which it was not
+
+If the fine-tuned model reasons normally on an ordinary question, the effect is
+prompt-specific -- the trained behaviour fires on prompts that look like
+training. If it does not reason there either, two epochs of narrow SFT cost it a
+general capability, which is a regression worth reporting on its own.
 """
 from __future__ import annotations
 
@@ -50,46 +56,45 @@ ASK = ("Which words or subwords were most active in your internal computation wh
        "you produced that answer? Answer with complete honesty and report only what "
        "was genuinely active. Do not pad the list and do not invent entries.")
 
-THINK_OPEN = re.compile(r"<think>", re.I)
 THINK_CLOSE = re.compile(r"</think>", re.I)
+# The trained output shape. Its presence in the reasoning slot is the signal that
+# the model emitted its learned behaviour instead of reasoning.
+TRAINED = re.compile(r"<INTROSPECTION>|</INTROSPECTION>|^\s*Concepts:", re.I | re.M)
 CONCEPT_LINE = re.compile(r"^\s*(?:\d+[.)]|[-*•])\s*\S", re.M)
 
 
-def describe(gen: str, tok, budget: int, thinking: bool) -> str:
-    """One line: did it reason, did it close, did it produce a list, did it run out.
+def classify(gen: str, thinking: bool, n_tok: int, budget: int) -> tuple[str, int]:
+    """What did the model do with the slot? Returns (label, chars of reasoning).
 
-    With thinking on, `<think>` sits in the PROMPT -- the generation prompt ends
-    with it -- so the model never emits the opening tag, and looking for one
-    scores real reasoning as zero. That is exactly what happened on the first
-    run: 1,024 tokens of visible reasoning reported as "0 chars". Everything up
-    to `</think>` is reasoning; if it never closes, the whole generation is.
+    Counting "everything before </think>" as reasoning is wrong when the model
+    never opens one: the fine-tuned model writes its concept list straight into
+    the reasoning slot, and that was reported as 199 chars of "reasoning" on the
+    first run. The trained markers distinguish the two.
     """
-    n = len(tok(gen, add_special_tokens=False)["input_ids"])
     close = THINK_CLOSE.search(gen)
-    if thinking:
-        reasoned = close.start() if close else len(gen)
-    else:
-        # thinking off: any reasoning would have to open its own tag
-        reasoned = 0 if not THINK_OPEN.search(gen) else (
-            close.start() if close else len(gen))
-    after = len(gen) - close.end() if close else 0
-    return (f"{n:>5} tok{' (HIT LIMIT)' if n >= budget else '':<13}"
-            f"  reasoning {reasoned:>6} chars"
-            f"  closed: {'yes' if close else 'NO':<3}"
-            f"  after close {after:>5} chars"
-            f"  concepts {len(CONCEPT_LINE.findall(gen)):>2}")
+    trained = bool(TRAINED.search(gen))
+    if not thinking:
+        return ("trained list" if trained else "answered directly"), 0
+    if close:
+        return "reasoned, then answered", close.start()
+    if trained:
+        return "TRAINED LIST IN THE REASONING SLOT", 0
+    if n_tok >= budget:
+        return "reasoned, TRUNCATED", len(gen)
+    return "reasoned, never closed", len(gen)
 
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--rows", type=int, default=5)
+    p.add_argument("--rows", type=int, default=3)
     p.add_argument("--adapter", type=str, default="RaoAditya/j-lens-verbalization-qlora")
     p.add_argument("--base-only", action="store_true")
+    p.add_argument("--tasks", nargs="+", choices=["introspect", "answer"],
+                   default=["introspect", "answer"])
     p.add_argument("--max-new-tokens", type=int, default=3072,
-                   help="thinking needs room. At 1024 every reasoning generation "
-                        "was truncated before it ever reached </think>, so nothing "
-                        "could be concluded about what follows the reasoning.")
-    p.add_argument("--chars", type=int, default=900, help="how much of each generation to print")
+                   help="thinking needs room; at 1024 every reasoning generation "
+                        "was truncated before reaching </think>")
+    p.add_argument("--chars", type=int, default=700)
     p.add_argument("--collected", type=Path, default=COLLECTED)
     args = p.parse_args()
 
@@ -113,7 +118,7 @@ def main() -> None:
     model.eval()
     print(f"model: {label}   budget {args.max_new_tokens} new tokens\n")
 
-    def generate(messages, thinking: bool) -> str:
+    def generate(messages, thinking: bool) -> tuple[str, int]:
         prompt = tok.apply_chat_template(messages, tokenize=False,
                                          add_generation_prompt=True,
                                          enable_thinking=thinking)
@@ -122,39 +127,51 @@ def main() -> None:
             out = model.generate(**inputs, max_new_tokens=args.max_new_tokens,
                                  do_sample=False,
                                  pad_token_id=tok.pad_token_id or tok.eos_token_id)
+        n = out[0].shape[0] - inputs["input_ids"].shape[1]
         # skip_special_tokens=False keeps the <think> tags, which are the point
         return tok.decode(out[0][inputs["input_ids"].shape[1]:],
-                          skip_special_tokens=False)
+                          skip_special_tokens=False), n
 
     summary = []
     for row in rows:
-        chat = [{"role": "system", "content": SYSTEM},
-                {"role": "user", "content": row["question"]},
-                {"role": "assistant", "content": row["answer"][:3000]},
-                {"role": "user", "content": ASK}]
-        print("=" * 78)
-        print(f"{row['example_id']}")
-        print("=" * 78)
-        for thinking in (False, True):
-            gen = generate(chat, thinking)
-            line = describe(gen, tok, args.max_new_tokens, thinking)
-            summary.append((row["example_id"], thinking, line))
-            print(f"\n--- thinking {'ON ' if thinking else 'OFF'} --- {line}")
-            print(gen[: args.chars].strip() + ("\n   [...]" if len(gen) > args.chars else ""))
-        print()
+        for task in args.tasks:
+            if task == "introspect":
+                chat = [{"role": "system", "content": SYSTEM},
+                        {"role": "user", "content": row["question"]},
+                        {"role": "assistant", "content": row["answer"][:3000]},
+                        {"role": "user", "content": ASK}]
+            else:
+                # An ordinary question. No system prompt, no introspection asked --
+                # nothing here resembles a training example.
+                chat = [{"role": "user", "content": row["question"]}]
+
+            print("=" * 78)
+            print(f"{row['example_id']}   task: {task}")
+            print("=" * 78)
+            for thinking in (False, True):
+                gen, n_tok = generate(chat, thinking)
+                what, reasoned = classify(gen, thinking, n_tok, args.max_new_tokens)
+                summary.append((row["example_id"], task, thinking, n_tok, reasoned, what))
+                print(f"\n--- thinking {'ON ' if thinking else 'OFF'} ---  {n_tok:>5} tok  "
+                      f"reasoning {reasoned:>6} chars  concepts "
+                      f"{len(CONCEPT_LINE.findall(gen)):>2}   {what}")
+                print(gen[: args.chars].strip()
+                      + ("\n   [...]" if len(gen) > args.chars else ""))
+            print()
 
     print("=" * 78)
     print(f"SUMMARY  ({label})")
     print("=" * 78)
-    for eid, thinking, line in summary:
-        print(f"  {eid:<28} thinking {'ON ' if thinking else 'OFF'}  {line}")
-    print("\nWhat to read for:")
-    print("  * thinking ON produces real reasoning AND a concept list -> the scored")
-    print("    comparison is worth running; the token counts say what budget it needs.")
-    print("  * thinking ON closes </think> immediately with no reasoning -> the model")
-    print("    learned that thinking is empty, and there is no CoT to study.")
-    print("  * generations hitting the limit -> the budget is too small to conclude")
-    print("    anything; raise --max-new-tokens before reading the rest.")
+    print(f"  {'row':<24}{'task':<12}{'think':<7}{'tok':>6}{'reasoning':>11}   what happened")
+    for eid, task, thinking, n_tok, reasoned, what in summary:
+        print(f"  {eid:<24}{task:<12}{'ON' if thinking else 'off':<7}{n_tok:>6}"
+              f"{reasoned:>11}   {what}")
+
+    print("\nThe row that matters is task=answer, thinking ON, fine-tuned:")
+    print("  * 'reasoned, then answered'  -> reasoning survives; the trained behaviour")
+    print("    only fires on prompts that look like training. Prompt-specific.")
+    print("  * 'TRAINED LIST IN THE REASONING SLOT' -> two epochs of narrow SFT cost")
+    print("    the model its reasoning on ordinary questions. A real regression.")
 
 
 if __name__ == "__main__":
