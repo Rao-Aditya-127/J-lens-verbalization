@@ -330,9 +330,13 @@ be treated as provisional even when its interval excludes zero.
 **This is `steer`, not Neuronpedia's `swapToken`.** `swap` has no strength
 parameter — its magnitude is whatever `h · ŝ` happens to be, measured at 0.2%,
 which changed nothing behaviourally. So the base-model curve here is **not**
-directly comparable to the 0% → 48% from Experiment 3; that was a different
-intervention. What is internally consistent is the base-vs-fine-tuned comparison,
-which uses identical code, prompts, rows and targets.
+directly comparable to the 0% → 48% in [`results/concept-swap/`](../concept-swap/);
+that was a different intervention, and one that could not be run against the
+fine-tuned model at all because `swapToken` is an API parameter and the API hosts
+the base model. Our local `swap` over the *same* 24–58 band behaves quite
+differently from Neuronpedia's, which is an open discrepancy noted in that
+write-up. What is internally consistent is the base-vs-fine-tuned comparison
+here, which uses identical code, prompts, rows and targets.
 
 **The two models peak at different strengths** (0.05 vs 0.1), so they are
 compared at their own optima rather than a shared dose. Comparing at matched

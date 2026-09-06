@@ -96,11 +96,20 @@ fine-tuned model's *internals* has to run locally. These do that.
 
 ---
 
-## `injection/` — the causal experiment
+## `injection/` — the causal experiments
 
 Change what is inside the model, leave the prompt byte-identical, and see whether
-the report follows. The only experiment here that a text-only predictor cannot
-explain. Full write-up: [`results/activation-injection/`](../results/activation-injection/).
+the report follows. The only experiments here that a text-only predictor cannot
+explain. There are two, and they are different interventions:
+
+| | write-up | models | dose axis |
+|---|---|---|---|
+| `swapToken`, via Neuronpedia's API | [`results/concept-swap/`](../results/concept-swap/) | base only | width of the layer band |
+| `steer`, local | [`results/activation-injection/`](../results/activation-injection/) | base **and** fine-tuned | strength |
+
+Swap could not be run against the fine-tuned model: it is an API parameter and
+the API hosts the base model. Locally it also has no strength knob, which is why
+the two-model comparison is built on `steer`.
 
 ```bash
 python training/injection/inject_sanity.py --rows 3        # does the injection land?
@@ -108,6 +117,9 @@ python training/injection/inject.py --base-only --rows 100
 python training/injection/inject.py --adapter RaoAditya/j-lens-verbalization-qlora --rows 100
 python training/injection/inject_stats.py                  # offline
 python training/injection/plot_inject.py                   # offline
+
+python dataset/jlens/analysis/injection_curve.py           # the swap run, API key, no GPU
+python training/injection/plot_swap.py                     # offline
 ```
 
 Run `inject_sanity.py` first. A flat dose-response is ambiguous between "the

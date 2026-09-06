@@ -10,7 +10,12 @@ venv/
 .pytest_cache/
 .DS_Store
 Thumbs.db
-dataset/jlens/analysis/
+# Exploratory API scripts, most superseded. Two are kept: they produced the
+# concept-swap result written up in results/concept-swap/, and git cannot
+# re-include a file whose parent DIRECTORY is excluded, hence the /* form.
+dataset/jlens/analysis/*
+!dataset/jlens/analysis/injection_curve.py
+!dataset/jlens/analysis/swap_report.py
 report/
 
 # Claude Code local machine state (settings.json, if added, stays tracked)
@@ -41,3 +46,4 @@ training/jlens_shift.json
 base30.txt
 probe_*.txt
 *.log
+injection_curve_results.json
