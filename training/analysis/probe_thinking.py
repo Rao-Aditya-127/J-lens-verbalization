@@ -110,12 +110,30 @@ def main() -> None:
                         "was truncated before reaching </think>")
     p.add_argument("--chars", type=int, default=700)
     p.add_argument("--collected", type=Path, default=COLLECTED)
+    p.add_argument("--row-ids", nargs="+", default=None, metavar="EXAMPLE_ID",
+                   help="run these rows instead of the first --rows. Use it to "
+                        "re-run a row the summary table flagged, at a budget "
+                        "large enough to see how the generation actually ends.")
+    p.add_argument("--think-modes", nargs="+", choices=["off", "on"],
+                   default=["off", "on"],
+                   help="which prefixes to run. `on` alone halves the cost when "
+                        "the thinking-off answer is already known.")
     args = p.parse_args()
 
     from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
     rows = [json.loads(l) for l in args.collected.open(encoding="utf-8") if l.strip()]
-    rows = [r for r in rows if r["split"] == "test"][: args.rows]
+    rows = [r for r in rows if r["split"] == "test"]
+    if args.row_ids:
+        by_id = {r["example_id"]: r for r in rows}
+        missing = [i for i in args.row_ids if i not in by_id]
+        if missing:
+            raise SystemExit(f"not in the test split: {', '.join(missing)}")
+        # Caller's order, not file order -- these are usually ranked candidates.
+        rows = [by_id[i] for i in args.row_ids]
+    else:
+        rows = rows[: args.rows]
+    think_modes = [m == "on" for m in args.think_modes]
 
     quant = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4",
                                bnb_4bit_use_double_quant=True,
@@ -162,7 +180,7 @@ def main() -> None:
             print("=" * 78)
             print(f"{row['example_id']}   task: {task}")
             print("=" * 78)
-            for thinking in (False, True):
+            for thinking in think_modes:
                 gen, n_tok = generate(chat, thinking)
                 what, reasoned = classify(gen, thinking, n_tok, args.max_new_tokens)
                 summary.append((row["example_id"], task, thinking, n_tok, reasoned, what))
