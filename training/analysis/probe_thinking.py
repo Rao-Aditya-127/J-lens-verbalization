@@ -55,15 +55,29 @@ THINK_CLOSE = re.compile(r"</think>", re.I)
 CONCEPT_LINE = re.compile(r"^\s*(?:\d+[.)]|[-*•])\s*\S", re.M)
 
 
-def describe(gen: str, tok, budget: int) -> str:
-    """One line: did it reason, did it close, did it produce a list, did it run out."""
+def describe(gen: str, tok, budget: int, thinking: bool) -> str:
+    """One line: did it reason, did it close, did it produce a list, did it run out.
+
+    With thinking on, `<think>` sits in the PROMPT -- the generation prompt ends
+    with it -- so the model never emits the opening tag, and looking for one
+    scores real reasoning as zero. That is exactly what happened on the first
+    run: 1,024 tokens of visible reasoning reported as "0 chars". Everything up
+    to `</think>` is reasoning; if it never closes, the whole generation is.
+    """
     n = len(tok(gen, add_special_tokens=False)["input_ids"])
     close = THINK_CLOSE.search(gen)
-    reasoned = close.start() if close else (len(gen) if THINK_OPEN.search(gen) else 0)
-    return (f"{n:>5} tokens{'  (HIT THE LIMIT)' if n >= budget else '':<18}"
-            f"  reasoning {reasoned:>5} chars"
-            f"  closed </think>: {'yes' if close else 'NO':<3}"
-            f"  concepts listed: {len(CONCEPT_LINE.findall(gen)):>2}")
+    if thinking:
+        reasoned = close.start() if close else len(gen)
+    else:
+        # thinking off: any reasoning would have to open its own tag
+        reasoned = 0 if not THINK_OPEN.search(gen) else (
+            close.start() if close else len(gen))
+    after = len(gen) - close.end() if close else 0
+    return (f"{n:>5} tok{' (HIT LIMIT)' if n >= budget else '':<13}"
+            f"  reasoning {reasoned:>6} chars"
+            f"  closed: {'yes' if close else 'NO':<3}"
+            f"  after close {after:>5} chars"
+            f"  concepts {len(CONCEPT_LINE.findall(gen)):>2}")
 
 
 def main() -> None:
@@ -71,8 +85,10 @@ def main() -> None:
     p.add_argument("--rows", type=int, default=5)
     p.add_argument("--adapter", type=str, default="RaoAditya/j-lens-verbalization-qlora")
     p.add_argument("--base-only", action="store_true")
-    p.add_argument("--max-new-tokens", type=int, default=1024,
-                   help="thinking needs room; the card suggests far more than this")
+    p.add_argument("--max-new-tokens", type=int, default=3072,
+                   help="thinking needs room. At 1024 every reasoning generation "
+                        "was truncated before it ever reached </think>, so nothing "
+                        "could be concluded about what follows the reasoning.")
     p.add_argument("--chars", type=int, default=900, help="how much of each generation to print")
     p.add_argument("--collected", type=Path, default=COLLECTED)
     args = p.parse_args()
@@ -121,7 +137,7 @@ def main() -> None:
         print("=" * 78)
         for thinking in (False, True):
             gen = generate(chat, thinking)
-            line = describe(gen, tok, args.max_new_tokens)
+            line = describe(gen, tok, args.max_new_tokens, thinking)
             summary.append((row["example_id"], thinking, line))
             print(f"\n--- thinking {'ON ' if thinking else 'OFF'} --- {line}")
             print(gen[: args.chars].strip() + ("\n   [...]" if len(gen) > args.chars else ""))
